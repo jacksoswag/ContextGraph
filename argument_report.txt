@@ -1,0 +1,13 @@
+--- THOUGHT CHAIN ARGUMENT REPORT ---
+Goal: write an essay
+Target: new york
+Phase: final
+Active histories: 2
+Sampled histories: 2
+
+[ARG 1] manhattan is part of span (local_information|new_york.txt)
+[RAW 1] [{'node': 'manhattan'}, {'subject': 'manhattan', 'subject_truth': 1, 'subject_tense': 2, 'subject_quant': 0, 'relation_id': 2, 'relation_label': 'subset of', 'truth': 1, 'predicate': 'span', 'predicate_truth': 1, 'predicate_tense': 2, 'predicate_quant': 0, 'source': 'local_information|new_york.txt'}]
+
+[ARG 2] city is alive (local_information|new_york.txt)
+[RAW 2] [{'node': 'city'}, {'subject': 'city', 'subject_truth': 1, 'subject_tense': 2, 'subject_quant': 0, 'relation_id': 669, 'relation_label': 'is', 'truth': 1, 'predicate': 'alive', 'predicate_truth': 1, 'predicate_tense': 2, 'predicate_quant': 0, 'source': 'local_information|new_york.txt'}]
+

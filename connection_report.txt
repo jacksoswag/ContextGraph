@@ -1,0 +1,57 @@
+--- CONNECTION DEBUG REPORT ---
+[CONN] waterfront -> edge | Type: 2 (subset of) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] edge -> boundary | Type: 2 (subset of) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] water -> near | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] pier -> industrial | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] ship -> cargo | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] commerce -> active | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] decline -> eventual | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] pier -> rotten | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] revival -> recreational | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] park -> green | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] access -> public | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] sea -> water | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] threat -> real | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] resilience -> necessary | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] housing -> project | Type: 2 (subset of) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] project -> public | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] government -> landlord | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] tower -> brick | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] tower -> tall | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] density -> high | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] street -> peripheral | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] community -> separate | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] funding -> low | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] maintenance -> poor | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] decay -> visible | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] need -> great | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] list -> long | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] crisis -> severe | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] bridge -> connection | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] connection -> vital | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] river -> passable | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] williamsburg -> span | Type: 2 (subset of) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] manhattan -> span | Type: 2 (subset of) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] traffic -> fluid | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] cable -> steel | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] steel -> bare | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] engineering -> visible | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] trolley -> historical | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] car -> present | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] congestion -> reality | Type: 2 (subset of) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] access -> free | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] movement -> constant | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] city -> alive | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] center -> campus | Type: 2 (subset of) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] campus -> cultural | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] art -> central | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] neighborhood -> old | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] displacement -> controversial | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] building -> travertine | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] plaza -> formal | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] atmosphere -> elite | Type: 0 (be) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] opera -> music | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] ballet -> dance | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] audience -> happy | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] scale -> monumental | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
+[CONN] vision -> modernist | Type: 669 (is) | S(Q0,T2,TRTrue) | P(Q0,T2,TRTrue) | Source: local_information|new_york.txt
