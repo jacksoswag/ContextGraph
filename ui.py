@@ -5,16 +5,39 @@ import asyncio
 import time
 import hashlib
 import re
+import sys
+from pathlib import Path
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect # type: ignore
 from fastapi.middleware.cors import CORSMiddleware # type: ignore
 from fastapi.staticfiles import StaticFiles # type: ignore
-from fastapi.responses import FileResponse, HTMLResponse # type: ignore
+from fastapi.responses import HTMLResponse # type: ignore
 from pydantic import BaseModel # type: ignore
 import uvicorn # type: ignore
-from multiprocessing import resource_tracker
-from constants import PHASE_IDLE, PHASE_RESEARCH, PHASE_EXPORT, PHASE_EXPORTED, PHASE_IMPORT, PHASE_IMPORTED, PHASE_PHYSICS, PHASE_STABLE, LOGICAL_CONNECTORS
 
-LOGICAL_CONNECTOR_COUNT = len(LOGICAL_CONNECTORS)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from constants import (
+    AGENT_POSITION_RECORD_BYTES,
+    CONNECTION_RECORD_SIZE,
+    COMMAND_SHM_BYTES,
+    DASHBOARD_HOST,
+    DASHBOARD_PORT,
+    MAX_AGENTS,
+    MAX_UI_AGENTS,
+    MAX_UI_BONDS,
+    MAX_UI_CONNECTION_STATS,
+    PHASE_IDLE,
+    PHASE_RESEARCH,
+    PHASE_PHYSICS,
+    PHASE_STABLE,
+    PHASE_THINKING,
+    PHASE_SYNTHESIS,
+    RESULTS_DIR,
+    WEBSOCKET_REFRESH_SECONDS,
+)
+from utils import remove_shm_from_resource_tracker
 
 app = FastAPI() # setup
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],)
@@ -26,38 +49,90 @@ NO_CACHE_HEADERS = {
     "Expires": "0",
 }
 
-def remove_shm_from_resource_tracker():
-    def fix_register(name, rtype):
-        if rtype == "shared_memory":
-            return
-        return resource_tracker._resource_tracker.register(name, rtype)
-
-    def fix_unregister(name, rtype):
-        if rtype == "shared_memory":
-            return
-        return resource_tracker._resource_tracker.unregister(name, rtype)
-
-    resource_tracker.register = fix_register
-    resource_tracker.unregister = fix_unregister
-
 remove_shm_from_resource_tracker()
 
-def map_shm(env_var): # Shared Memory Mapping
-    name = os.environ.get(env_var)
-    if not name: return None
+def map_shm(*env_vars): # Shared Memory Mapping
+    name = next((os.environ.get(env_var) for env_var in env_vars if os.environ.get(env_var)), None)
+    if not name:
+        return None
     try:
         from multiprocessing import shared_memory
         return shared_memory.SharedMemory(name=name)
     except Exception as e:
-        print(f"[WEB] Failed to map {env_var} ({name}): {e}")
+        joined = ", ".join(env_vars)
+        print(f"[WEB] Failed to map {joined} ({name}): {e}")
         return None
 
 # Map segments from environment variables set by main.py
-shm_pos = map_shm("SHM_SKS_POS")
-shm_connections = map_shm("SHM_SKS_CONNECTIONS")
-shm_status = map_shm("SHM_SKS_STATUS")
-shm_report = map_shm("SHM_SKS_REPORT")
-shm_cmd = map_shm("SHM_SKS_COMMAND")
+shm_pos = map_shm("SHM_POS")
+shm_connections = map_shm("SHM_CONNECTIONS")
+shm_status = map_shm("SHM_STATUS")
+shm_report = map_shm("SHM_REPORT")
+shm_cmd = map_shm("SHM_COMMAND")
+
+def _agent_is_initialized(x, y, z):
+    return not (x == 0 and y == 0 and z == 0)
+
+def _count_initialized_agents(limit=MAX_AGENTS):
+    if not shm_pos:
+        return 0
+    count = 0
+    scan_limit = min(int(limit), MAX_AGENTS)
+    for i in range(scan_limit):
+        off = i * AGENT_POSITION_RECORD_BYTES
+        try:
+            x, y, z = struct.unpack_from("fff", shm_pos.buf, off)
+        except struct.error:
+            break
+        if _agent_is_initialized(x, y, z):
+            count += 1
+    return count
+
+def _results_root():
+    return PROJECT_ROOT / RESULTS_DIR
+
+def _read_result_text(result_dir, filename):
+    path = result_dir / filename
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8", errors="ignore").strip()
+
+def _target_from_arguments(arguments_text, label):
+    patterns = (
+        rf"^{label}\s+is\s+(.+?)\.\s*$",
+        rf"^{label}:\s*(.+?)\s*$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, arguments_text, flags=re.IGNORECASE | re.MULTILINE)
+        if not match:
+            continue
+        value = " ".join(match.group(1).strip().split())
+        if value and value.lower() != "(none)":
+            return value
+    return ""
+
+def _result_summary(result_dir):
+    arguments_text = _read_result_text(result_dir, "arguments.txt")
+    target_a = _target_from_arguments(arguments_text, "Target A")
+    target_b = _target_from_arguments(arguments_text, "Target B")
+    title = f"{target_a} and {target_b}" if target_a and target_b else result_dir.name
+    return {
+        "id": result_dir.name,
+        "title": title,
+        "target_a": target_a,
+        "target_b": target_b,
+        "created": result_dir.name,
+    }
+
+def _safe_result_dir(result_id):
+    clean_id = str(result_id or "").strip()
+    if not clean_id or clean_id in {".", ".."} or "/" in clean_id or "\\" in clean_id:
+        raise HTTPException(status_code=404, detail="Result not found")
+    root = _results_root().resolve()
+    result_dir = (root / clean_id).resolve()
+    if root not in result_dir.parents or not result_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Result not found")
+    return result_dir
 
 @app.get("/")
 async def read_index(): # opens index.html when you go to localhost:8000
@@ -67,6 +142,27 @@ async def read_index(): # opens index.html when you go to localhost:8000
     html = re.sub(r'src="main\.js(?:\?v=[^"]*)?"', f'src="main.js?v={FRONTEND_ASSET_VERSION}"', html)
     return HTMLResponse(content=html, headers=NO_CACHE_HEADERS)
 
+@app.get("/results")
+async def list_results():
+    root = _results_root()
+    if not root.is_dir():
+        return {"results": []}
+    result_dirs = [
+        path
+        for path in root.iterdir()
+        if path.is_dir() and (path / "synthesis.txt").is_file()
+    ]
+    result_dirs.sort(key=lambda path: path.name, reverse=True)
+    return {"results": [_result_summary(path) for path in result_dirs]}
+
+@app.get("/results/{result_id}")
+async def read_result(result_id: str):
+    result_dir = _safe_result_dir(result_id)
+    summary = _result_summary(result_dir)
+    return {
+        **summary,
+        "synthesis": _read_result_text(result_dir, "synthesis.txt"),
+    }
 
 @app.middleware("http")
 async def disable_cache_for_dashboard_assets(request, call_next):
@@ -81,44 +177,57 @@ async def disable_cache_for_dashboard_assets(request, call_next):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("[WEB] WebSocket client connected.")
+    cached_agent_count = 0
+    last_agent_count_check = 0.0
     try:
         while True:
-            state = {"agents": [], "connections": [], "status": "System Online", "phase": PHASE_IDLE, "report": "", "report_version": 0}
-            # Read connections first so we can compute per-agent connection counts
-            conn_counts = {}
-            logical_agent_ids = set()
+            now = time.time()
+            if now - last_agent_count_check >= 1.0:
+                cached_agent_count = _count_initialized_agents()
+                last_agent_count_check = now
+
+            state = {
+                "agents": [],
+                "connections": [],
+                "status": "System Online",
+                "phase": PHASE_IDLE,
+                "report": "",
+                "report_version": 0,
+                "agent_count": cached_agent_count,
+                "agent_capacity": MAX_AGENTS,
+                "agent_cap_reached": cached_agent_count >= MAX_AGENTS,
+            }
+            # Read connections first so we can compute per-agent connection counts.
+            total_conn_counts = {}
             if shm_connections:
                 try:
                     count = struct.unpack_from("i", shm_connections.buf, 0)[0] # get number of connections
-                    count = min(count, 2400)
-                    for i in range(count):
-                        off = 4 + (i * 16)
-                        s, f, flags, d = struct.unpack_from("iiii", shm_connections.buf, off) # extract all connections one by one
-                        if f >= LOGICAL_CONNECTOR_COUNT:
-                            continue
-                        logical_agent_ids.add(s)
-                        logical_agent_ids.add(d)
-                        conn_counts[s] = conn_counts.get(s, 0) + 1 # counts how many connections per agent
-                        conn_counts[d] = conn_counts.get(d, 0) + 1 # 
-                        state["connections"].append({"s": s, "d": d, "f": f, "truth": (flags & 1), "flags": flags}) # store connection
+                    stats_count = min(count, MAX_UI_CONNECTION_STATS)
+                    for i in range(stats_count):
+                        off = 4 + (i * CONNECTION_RECORD_SIZE)
+                        s, f, d, utility = struct.unpack_from("<iiif", shm_connections.buf, off) # extract all connections one by one
+                        total_conn_counts[s] = total_conn_counts.get(s, 0) + 1
+                        total_conn_counts[d] = total_conn_counts.get(d, 0) + 1
+                        if len(state["connections"]) < MAX_UI_BONDS:
+                            state["connections"].append({"s": s, "d": d, "f": f, "utility": utility}) # store connection
                 except: pass
 
-            max_conns = max(conn_counts.values(), default=1) # gets max connections (only used for visuals)
-            nonlogical_agents = []
             if shm_pos:
-                for i in range(1600): # Read Agents (capped for web performance)
-                    off = i * 24
+                for i in range(MAX_UI_AGENTS): # Read Agents (capped for web performance)
+                    off = i * AGENT_POSITION_RECORD_BYTES
                     try:
                         x, y, z = struct.unpack_from("fff", shm_pos.buf, off)
-                        if x == 0 and y == 0 and z == 0: continue # Skips rendering agents that haven't been initialized
-                        c = conn_counts.get(i, 0) / max_conns # Visualizes agent connectivity 
-                        agent = {"id": i, "x": x, "y": y, "z": z, "c": c, "logical": i in logical_agent_ids}
-                        if agent["logical"]:
-                            state["agents"].append(agent)
-                        else:
-                            nonlogical_agents.append(agent)
+                        if not _agent_is_initialized(x, y, z): continue # Skips rendering agents that haven't been initialized
+                        degree = total_conn_counts.get(i, 0)
+                        agent = {
+                            "id": i,
+                            "x": x,
+                            "y": y,
+                            "z": z,
+                            "degree": degree,
+                        }
+                        state["agents"].append(agent)
                     except: break # Caps number of agents rendered to help the renderer, doesn't affect logic
-            state["agents"].extend(nonlogical_agents)
 
             # Reads and displays status messages
             if shm_status:
@@ -126,12 +235,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 messages = { # Map numbers to messages
                     PHASE_IDLE: "System Idle",
                     PHASE_RESEARCH: "Researching",
-                    PHASE_EXPORT: "Exporting agents",
-                    PHASE_EXPORTED: "Grouping agents",
-                    PHASE_IMPORT: "Importing optimized graph",
-                    PHASE_IMPORTED: "Preparing physics",
                     PHASE_PHYSICS: "Simulating physics",
-                    PHASE_STABLE: "Stabilized. Generating report",
+                    PHASE_STABLE: "Graph stabilized",
+                    PHASE_THINKING: "Running thought processes",
+                    PHASE_SYNTHESIS: "Generating report",
                 }
                 state["phase"] = phase
                 state["status"] = messages.get(phase, f"Phase {phase}")
@@ -145,25 +252,28 @@ async def websocket_endpoint(websocket: WebSocket):
                 except: pass
 
             await websocket.send_json(state)
-            await asyncio.sleep(0.1) # server/browser communication (10Hz)
+            await asyncio.sleep(WEBSOCKET_REFRESH_SECONDS) # server/browser communication
     except WebSocketDisconnect:
         print("[WEB] WebSocket client disconnected.")
     except Exception as e:
         print(f"[WEB] WebSocket Error: {e}")
 
 class Command(BaseModel): # verifies strict command data format
-    type: str
-    goal: str = ""
-    target: str = ""
-    local_only: bool = False
+    target_a: str = ""
+    target_b: str = ""
+    tense_preference: str = "none"
 
 @app.post("/command") # post endpoint to dispatch user prompts
 async def post_command(cmd: Command):
     if not shm_cmd: raise HTTPException(status_code=500, detail="Command SHM not mapped")
 
-    target = cmd.target.strip()
-    if not target:
-        raise HTTPException(status_code=400, detail="Target is required")
+    target_a = cmd.target_a.strip()
+    target_b = cmd.target_b.strip()
+    tense_preference = cmd.tense_preference.strip().lower()
+    if tense_preference not in {"past", "future"}:
+        tense_preference = "none"
+    if not target_a or not target_b:
+        raise HTTPException(status_code=400, detail="Both targets are required")
 
     if shm_status:
         phase = shm_status.buf[0]
@@ -172,13 +282,13 @@ async def post_command(cmd: Command):
 
     payload = {
         "id": str(time.time_ns()),
-        "goal": cmd.goal.strip(),
-        "target": target,
-        "local_only": bool(cmd.local_only),
+        "target_a": target_a,
+        "target_b": target_b,
+        "tense_preference": tense_preference,
     }
     payload_text = json.dumps(payload, separators=(",", ":"))
     cmd_bytes = payload_text.encode("utf-8")
-    if len(cmd_bytes) > 2047:
+    if len(cmd_bytes) > COMMAND_SHM_BYTES - 1:
         raise HTTPException(status_code=413, detail="Command too large for shared memory buffer")
 
     shm_cmd.buf[:] = b"\x00" * len(shm_cmd.buf)
@@ -186,9 +296,15 @@ async def post_command(cmd: Command):
     shm_cmd.buf[len(cmd_bytes):len(cmd_bytes)+1] = b"\x00"
 
     print(f"[WEB] Dispatched Command: {payload_text}")
-    return {"status": "dispatched", "command_id": payload["id"], "target": target}
+    return {
+        "status": "dispatched",
+        "command_id": payload["id"],
+        "target_a": target_a,
+        "target_b": target_b,
+        "tense_preference": tense_preference,
+    }
 
 app.mount("/", StaticFiles(directory="frontend"), name="frontend") # Mount static files so style.css and main.js are accessible
 
 if __name__ == "__main__": # entry point, runs the server
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=DASHBOARD_HOST, port=DASHBOARD_PORT)

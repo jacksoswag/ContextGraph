@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Forensic Intelligence Engine</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div id="app">
+        <!-- Sidebar: Research Synthesis -->
+        <aside id="sidebar">
+            <header>
+                <h2>RESEARCH CHAT</h2>
+                <div class="header-line"></div>
+                <div id="engine-status" style="display:none"></div>
+            </header>
+
+            <div id="report-container">
+                <div id="report-content">
+                    <p class="placeholder">Awaiting research grounding...</p>
+                </div>
+            </div>
+
+            <footer>
+                <button id="copy-btn">COPY CHAT</button>
+            </footer>
+        </aside>
+
+        <!-- Main Workspace: 3D Visualization -->
+        <main id="workspace">
+            <div id="canvas-container"></div>
+
+            <!-- Floating Controls -->
+            <div id="ui-overlay">
+                <div class="top-bar">
+                    <h1>Forensic Intelligence Engine</h1>
+                </div>
+
+                <div class="bottom-controls">
+                    <div class="input-group">
+                        <label>TARGET A</label>
+                        <input type="text" id="input-target-a" placeholder="e.g. urban sprawl">
+                    </div>
+                    <div class="input-group">
+                        <label>TARGET B</label>
+                        <input type="text" id="input-target-b" placeholder="e.g. housing affordability">
+                    </div>
+                    <div class="input-group tense-group">
+                        <label>TENSE FAVOR</label>
+                        <select id="input-tense-preference">
+                            <option value="none">None</option>
+                            <option value="past">Past</option>
+                            <option value="future">Future</option>
+                        </select>
+                    </div>
+                    <button id="launch-btn">LAUNCH RESEARCH</button>
+                </div>
+            </div>
+        </main>
+
+        <aside id="history-sidebar">
+            <header>
+                <h2>RESEARCH HISTORY</h2>
+                <div class="header-line"></div>
+            </header>
+            <div id="history-list">
+                <button class="history-entry history-new-query active" id="new-query-btn">New Prompt</button>
+            </div>
+        </aside>
+    </div>
+
+    <!-- Three.js and App Logic -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+    <script type="module" src="main.js"></script>
+</body>
+
+</html>
