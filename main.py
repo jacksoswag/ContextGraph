@@ -1,81 +1,102 @@
-
 import multiprocessing as mp
 import os
-import socket
 import sys
 import time
+import threading
 import subprocess
-from multiprocessing import shared_memory
 from dotenv import load_dotenv # type: ignore
-from constants import PHASE_IDLE, PHASE_RESEARCH, PHASE_EXPORT, PHASE_EXPORTED, PHASE_IMPORT, PHASE_IMPORTED, PHASE_PHYSICS, PHASE_STABLE
-
 load_dotenv()
-from d_scrape_worker import scrape_worker_loop
 
-# Silence ResourceTracker warnings for manually managed SHM segments
-from multiprocessing import resource_tracker
-def remove_shm_from_resource_tracker():
-    def fix_register(name, rtype):
-        if rtype == "shared_memory": return
-        return resource_tracker._resource_tracker.register(name, rtype)
-    resource_tracker.register = fix_register
-    def fix_unregister(name, rtype):
-        if rtype == "shared_memory": return
-        return resource_tracker._resource_tracker.unregister(name, rtype)
-    resource_tracker.unregister = fix_unregister
-if __name__ == "main" or __name__ == "__main__":
-    remove_shm_from_resource_tracker()
+from constants import (
+    AGENT_POSITION_RECORD_BYTES,
+    COMMAND_SHM_BYTES,
+    CONNECTION_COUNT_BYTES,
+    CONNECTION_RECORD_SIZE,
+    DASHBOARD_PORT,
+    DASHBOARD_URL,
+    MAX_AGENTS,
+    MAX_CONNECTIONS,
+    PHASE_IDLE,
+    PHASE_PHYSICS,
+    PHASE_RESEARCH,
+    PHASE_STABLE,
+    PHASE_SYNTHESIS,
+    PHASE_THINKING,
+    REPORT_SHM_BYTES,
+    SCRAPE_THREADS,
+    STATUS_SHM_BYTES,
+)
+from utils import remove_shm_from_resource_tracker, ensure_port_free, create_shm, write_report   
 
-_SHM_ANCHORS = []
-
-
-def write_report(shm, message):
-    payload = message.encode("utf-8")[:(shm.size - 1)]
-    shm.buf[:] = b"\x00" * shm.size
-    shm.buf[:len(payload)] = payload
-    shm.buf[len(payload):len(payload)+1] = b"\x00"
-
-
-def is_port_in_use(port):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.2)
-        return sock.connect_ex(("127.0.0.1", port)) == 0
-
-
-def find_physics_binary():
-    for candidate in ("./physics_engine", "./SKS_Renderer"):
-        if os.path.exists(candidate):
-            return candidate
-    return None
+if __name__ == "__main__": remove_shm_from_resource_tracker()
 
 def launch_webapp(names_dict): # Launches clean web UI (localhost:8000)
-    if is_port_in_use(8000):
-        raise RuntimeError("Port 8000 is already in use. Refusing to kill an unrelated process.")
-    print("[SYSTEM] Launching Dashboard UI on http://localhost:8000")
+    ensure_port_free(DASHBOARD_PORT)
+    print(f"[SYSTEM] Launching Dashboard UI on {DASHBOARD_URL}")
     env = os.environ.copy() # sets up env containing api key
-    env["SHM_SKS_POS"]         = names_dict["sks_pos"]
-    env["SHM_SKS_CONNECTIONS"]  = names_dict["sks_connections"]
-    env["SHM_SKS_STATUS"]       = names_dict["sks_status"]
-    env["SHM_SKS_COMMAND"]      = names_dict["sks_command"]
-    env["SHM_SKS_REPORT"]       = names_dict["sks_report"]
-    cmd = [sys.executable, "ui.py"] # checks for ui.py in cwd or frontend/ui.py
-    if not os.path.exists("ui.py") and os.path.exists("frontend/ui.py"):
-        cmd = [sys.executable, "frontend/ui.py"]
+    env["SHM_POS"]         = names_dict["pos"]
+    env["SHM_CONNECTIONS"] = names_dict["connections"]
+    env["SHM_STATUS"]      = names_dict["status"]
+    env["SHM_COMMAND"]     = names_dict["command"]
+    env["SHM_REPORT"]      = names_dict["report"]
+    cmd = [sys.executable, "frontend/ui.py"]
     return subprocess.Popen(cmd, env=env) # opens
 
 def launch_physics(names_dict): # calls c++ to launch physics
-    physics_binary = find_physics_binary()
-    if not physics_binary:
-        print("[SYSTEM] WARNING: physics binary not found. Skipping physics.")
-        return None
+    physics_binary = "./physics_engine"
     print(f"[SYSTEM] Launching C++ Physics Engine ({os.path.basename(physics_binary)})")
     env = os.environ.copy()
-    env["SHM_SKS_POS"]         = names_dict["sks_pos"]
-    env["SHM_SKS_CONNECTIONS"]  = names_dict["sks_connections"]
-    env["SHM_SKS_STATUS"]       = names_dict["sks_status"]
+    env["SHM_POS"]         = names_dict["pos"]
+    env["SHM_CONNECTIONS"] = names_dict["connections"]
+    env["SHM_STATUS"]      = names_dict["status"]
     return subprocess.Popen([physics_binary], env=env) # opens
 
+def manage_shm(): 
+    # pos_shm: agent positions, connection_shm: connection data, command_shm: prompt payload, status_shm: status, report_shm: reports
+    anchors = {}
+
+    def _create_and_anchor(name, size): # creates and anchors SHM
+        unique_name, shm = create_shm(name, size)
+        anchors[name] = shm
+        return unique_name, shm
+
+    pos_name, pos_shm = _create_and_anchor(
+        "pos",
+        MAX_AGENTS * AGENT_POSITION_RECORD_BYTES,
+    )
+    report_name, report_shm = _create_and_anchor("report", REPORT_SHM_BYTES)
+    command_name, command_shm = _create_and_anchor("command", COMMAND_SHM_BYTES)
+    status_name, status_shm = _create_and_anchor("status", STATUS_SHM_BYTES)
+    connection_name, connection_shm = _create_and_anchor(
+        "connections",
+        CONNECTION_COUNT_BYTES + MAX_CONNECTIONS * CONNECTION_RECORD_SIZE,
+    )
+
+    for shm in (pos_shm, report_shm, command_shm, status_shm, connection_shm):
+        shm.buf[:] = b"\x00" * shm.size # zero out SHM segments to prevent garbage data
+
+    names = { # stores it in raw bytes
+        "pos":     pos_name,
+        "report":  report_name,
+        "command": command_name,
+        "connections": connection_name,
+        "status":  status_name,
+    }
+    return names, anchors
+
+
+
 def main():
+    runtime_api = None
+    scrapers = []
+    brain_thread = None
+    server_proc = None
+    physics_proc = None
+
+    shm_names, shm_handles = manage_shm() # initializes and returns shared memory
+    status_shm = shm_handles["status"]
+    report_shm = shm_handles["report"]
+
     scrape_queue  = mp.Queue() # distributes scrape workers to separate threads
     asu_queue     = mp.Queue()
     stop_event    = mp.Event()
@@ -84,104 +105,61 @@ def main():
     sync_counter  = mp.Value('i', 0)
     ingest_counter = mp.Value('i', 0)
 
-    def _create_shm(name, size): # creates shared memory segments that the UI and Physics Engine can access
-        unique_name = f"{name}_{int(time.time()) % 10000}"
-        shm = shared_memory.SharedMemory(name=unique_name, create=True, size=size)
-        _SHM_ANCHORS.append(shm)
-        print(f"[SYSTEM] Created SHM: {unique_name} ({size} bytes)")
-        return unique_name, shm
-
     try:
-        # pos_shm handles agent positions, connection_shm handles connection data, command_shm handles commands, status_shm handles status, and report_shm handles research reports
-        pos_name,     pos_shm     = _create_shm("sks_pos",    60000 * 6 * 4) # agent positions (capped at 60000 for now)
-        report_name,  report_shm  = _create_shm("sks_report", 128 * 1024) # research reports (arguments, evidence, synthesis)
-        command_name, command_shm = _create_shm("sks_command", 2 * 1024) # research commands (goal/target pairs)
-        status_name,  status_shm  = _create_shm("sks_status",  1 * 1024) # phase number
-        connection_name, connection_shm = _create_shm("sks_connections", 4 + 80000 * 16) # connection data (capped at 80000 for now)
-
-        for shm in (pos_shm, report_shm, command_shm, status_shm, connection_shm):
-            shm.buf[:] = b"\x00" * shm.size # zero out SHM segments to prevent garbage data
-
-        shm_names = { # stores it in raw bytes
-            "sks_pos":     pos_name,
-            "sks_report":  report_name,
-            "sks_command": command_name,
-            "sks_connections": connection_name,
-            "sks_status":  status_name,
-        }
-
         server_proc        = launch_webapp(shm_names) # launch web UI
-        physics_proc       = None
         status_shm.buf[0]  = PHASE_IDLE # updates phase
         zero_ticks         = 0  # consecutive ticks where sync_counter == 0 and queue empty
 
-        scrapers = []
-        for i in range(8): # launch 8 scrape workers
-            p = mp.Process(
-                target=scrape_worker_loop, # calls scraper_worker.py for each thread
-                args=(scrape_queue, asu_queue, stop_event, shared_cache, sync_counter),
-                name=f"SKS_Worker_{i}",
-                daemon=True
-            )
+        from d_scrape_worker import scrape_worker_loop
+        import runtime as runtime_api
+
+        # ------------ THREAD SETUP ------------
+        for i in range(SCRAPE_THREADS): # launch 8 scrape workers
+            p = mp.Process(target=scrape_worker_loop, # calls scraper_worker.py for each thread
+                args=(scrape_queue, asu_queue, stop_event, shared_cache, sync_counter), name=f"Worker_{i}", daemon=True)
             p.start()
             scrapers.append(p)
 
-        from m_brain import run_brain # calls brain.py
-        brain_proc = mp.Process(
-            target=run_brain, # agents are spawned in, but physics WAITS until all queries finish
+        brain_thread = threading.Thread(
+            target=runtime_api.run_brain, # brain now lives in the main process instead of its own child process
             args=(scrape_queue, asu_queue, stop_event, shm_names, sync_counter, ingest_counter),
             name="brain",
-            daemon=True
+            daemon=True,
         )
-        brain_proc.start() # starts brain
+        brain_thread.start()
 
         print("[SYSTEM] Engine idle. Awaiting prompts.")
 
+        # ------------ MAIN LOOP ------------
         while not stop_event.is_set(): # continues if program is still running
             time.sleep(1)
             current_status = status_shm.buf[0] # checks phase
-
-            # PHASE_RESEARCH → PHASE_EXPORT
+            
+            # The following blocks check for phase end conditions and start next phase.
+            # Researching → Physics
             if current_status == PHASE_RESEARCH: # Require 3 consecutive quiet ticks to guard against the sync_counter briefly hitting 0 between query batches.
                 with sync_counter.get_lock(), ingest_counter.get_lock():
                     quiet = sync_counter.value <= 0 and ingest_counter.value <= 0
-                if quiet: # checks if query list is empty and all scrapers have finished
+                if quiet: # checks if agents are done processing and query list is empty
                     zero_ticks += 1
                     if zero_ticks >= 3: # ensures that it stays in research mode for at least 3 ticks to prevent race conditions
-                        print("[SYSTEM] Research complete. Initiating semantic grouping...")
-                        status_shm.buf[0] = PHASE_EXPORT
+                        print("[SYSTEM] Research complete. Launching physics simulation...")
+                        status_shm.buf[0] = PHASE_PHYSICS
+                        physics_proc = launch_physics(shm_names)
+                        if physics_proc is None:
+                            print("[SYSTEM] Physics skipped. Marking graph as stable.")
+                            status_shm.buf[0] = PHASE_STABLE
                         zero_ticks = 0
                 else: zero_ticks = 0
 
-            # PHASE_EXPORTED → run grouping script → PHASE_IMPORT
-            # At this point, all connections between ASUs have been processed and exported
-            elif current_status == PHASE_EXPORTED:
-                print("[SYSTEM] Agents exported. Running p_info_grouping.py...")
-                env = os.environ.copy()
-                env["SHM_SKS_CONNECTIONS"] = connection_name
-                result = subprocess.run([sys.executable, "p_info_grouping.py"], env=env) # runs information grouping script
-                if result.returncode != 0:
-                    error = f"[error] Grouping failed with exit code {result.returncode}."
-                    print(f"[SYSTEM] {error}")
-                    write_report(report_shm, error)
-                    status_shm.buf[0] = PHASE_IDLE
-                else:
-                    status_shm.buf[0] = PHASE_IMPORT # transitions to Phase Import (end of p_info_grouping.py)
-
-            # PHASE_IMPORTED → launch physics
-            elif current_status == PHASE_IMPORTED:
-                print("[SYSTEM] Grouping complete. Launching physics simulation...")
-                status_shm.buf[0] = PHASE_PHYSICS
-                physics_proc = launch_physics(shm_names) # launches C++ Physics Engine
-                if physics_proc is None:
-                    print("[SYSTEM] Physics skipped. Marking graph as stable.")
-                    status_shm.buf[0] = PHASE_STABLE
-
-            # PHASE_PHYSICS → watch for physics exit
-            if physics_proc and physics_proc.poll() is not None:
+            # Physics → Watching for stability
+            if physics_proc and physics_proc.poll() is not None: # checks if physics engine is done
                 if physics_proc.returncode == 0:
                     print("[SYSTEM] Physics stabilized.")
                     status_shm.buf[0] = PHASE_STABLE # updates phase, will be read by synthesis.py
+                elif physics_proc.returncode == 2:
+                    print("[SYSTEM] Physics reached its time limit without stabilizing. Proceeding with the current layout.")
+                    status_shm.buf[0] = PHASE_STABLE
                 else:
                     error = f"[error] Physics engine failed with exit code {physics_proc.returncode}."
                     print(f"[SYSTEM] {error}")
@@ -192,7 +170,29 @@ def main():
             if server_proc and server_proc.poll() is not None:
                 print("[SYSTEM] Web server terminated. Shutting down...")
                 stop_event.set()
-
+            
+            # Stable -> Thinking (Starting the autonomous analysis)
+            if current_status == PHASE_STABLE:
+                print("[SYSTEM] Graph stabilized. Starting Thought Processes...")
+                status_shm.buf[0] = PHASE_THINKING
+                if runtime_api.launch_thought_workers(stop_event):
+                    print("[SYSTEM] Thought workers launched.")
+                else:
+                    print("[SYSTEM] Brain is not ready to launch thought workers yet.")
+                
+            # Thinking -> Synthesis (Moving from analysis to report writing)
+            if current_status == PHASE_THINKING:
+                if not brain_thread.is_alive():
+                    raise RuntimeError("Brain thread terminated during thought processing.")
+                runtime_api.launch_thought_workers(stop_event)
+                if runtime_api.thought_workers_finished():
+                    stats = runtime_api.thought_worker_stats()
+                    print(
+                        f"[SYSTEM] Thought workers finished: "
+                        f"{stats['endpoint']} at endpoints / {stats['dead']} dead / "
+                        f"{stats.get('max_hops', 0)} max hops / {stats['successful']} successful."
+                    )
+                    status_shm.buf[0] = PHASE_SYNTHESIS
     except KeyboardInterrupt: # stops everything at keyboard interrupt (ctrl+c)
         print("[SYSTEM] Interrupt received.")
         stop_event.set()
@@ -201,12 +201,18 @@ def main():
         stop_event.set()
     finally: # stops everything at end of program, cleans up technical stuff
         print("[SYSTEM] Cleaning up...")
-        if 'brain_proc' in locals(): brain_proc.terminate()
-        if 'scrapers'   in locals():
-            for p in scrapers: p.terminate()
-        if 'server_proc'  in locals() and server_proc:  server_proc.terminate()
-        if 'physics_proc' in locals() and physics_proc: physics_proc.terminate()
-        for shm in _SHM_ANCHORS: # closes and removes shared memory segments
+        stop_event.set()
+        if runtime_api:
+            runtime_api.stop_thought_workers()
+        for p in scrapers:
+            p.terminate()
+        if server_proc:
+            server_proc.terminate()
+        if physics_proc:
+            physics_proc.terminate()
+        if brain_thread and brain_thread.is_alive():
+            brain_thread.join(timeout=2.0)
+        for shm in shm_handles.values(): # closes and removes shared memory segments
             try:
                 shm.close()
                 shm.unlink()
