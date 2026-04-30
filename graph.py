@@ -15,8 +15,10 @@ from constants import (
     AGENT_NEAR_PARENT_WEIGHT,
     AGENT_SPAWN_JITTER,
     EXTRACTION_BLOCK_LIMIT,
+    MAX_MERGE_SIMILARITY,
     MAX_AGENTS,
     MAX_CONNECTIONS_PER_QUERY,
+    MIN_MERGE_SIMILARITY,
 )
 from d_logic_extractor import find_connections
 from d_noise_cleanup import (
@@ -24,7 +26,7 @@ from d_noise_cleanup import (
     expand_clean_connection_record,
     is_usable_agent_text,
 )
-from d_word_info_map import cosine_similarity, merge_similarity_threshold, precache_text_vectors, str_to_vector
+from d_word_info_map import precache_text_vectors, str_to_vector, vector_specificity
 
 from utils import (
     flush_conn_log as util_flush_conn_log,
@@ -214,9 +216,8 @@ class Brain:
         if incoming.size == 0:
             return ""
 
-        best_name = ""
-        best_score = -1.0
-        best_threshold = 1.0
+        candidate_names = []
+        candidate_vectors = []
         for agent_name in self._merge_candidate_names(clean, incoming):
             agent = self.agents.get(agent_name)
             if agent is None:
@@ -224,15 +225,49 @@ class Brain:
             existing = np.asarray(getattr(agent, "info_vector", []), dtype=np.float32).reshape(-1)
             if existing.size == 0 or existing.shape != incoming.shape:
                 continue
-            try:
-                score = cosine_similarity(incoming, existing)
-                threshold = merge_similarity_threshold(incoming, existing)
-            except Exception:
-                continue
-            if score >= threshold and score > best_score:
-                best_name = agent_name
-                best_score = score
-                best_threshold = threshold
+            candidate_names.append(agent_name)
+            candidate_vectors.append(existing)
+
+        if not candidate_vectors:
+            return ""
+
+        matrix = np.vstack(candidate_vectors).astype(np.float32, copy=False)
+        incoming_norm = float(np.linalg.norm(incoming))
+        candidate_norms = np.linalg.norm(matrix, axis=1)
+        valid_norms = candidate_norms > 1e-12
+        if incoming_norm <= 1e-12 or not np.any(valid_norms):
+            return ""
+
+        scores = np.full(len(candidate_names), -1.0, dtype=np.float32)
+        scores[valid_norms] = (
+            np.matmul(matrix[valid_norms], incoming)
+            / (candidate_norms[valid_norms] * incoming_norm)
+        )
+
+        dimension = max(1, int(matrix.shape[1]))
+        magnitudes = candidate_norms
+        nonzero_ratio = np.count_nonzero(np.abs(matrix) > 1e-8, axis=1) / float(dimension)
+        magnitude_signal = magnitudes / (magnitudes + 1.0)
+        sparsity_signal = 1.0 - nonzero_ratio
+        candidate_specificity = np.clip(
+            (0.8 * magnitude_signal) + (0.2 * sparsity_signal),
+            0.0,
+            1.0,
+        )
+        incoming_specificity = vector_specificity(incoming)
+        thresholds = MIN_MERGE_SIMILARITY + (
+            (MAX_MERGE_SIMILARITY - MIN_MERGE_SIMILARITY)
+            * np.maximum(incoming_specificity, candidate_specificity)
+        )
+
+        eligible_scores = np.where(scores >= thresholds, scores, -1.0)
+        best_index = int(np.argmax(eligible_scores))
+        best_score = float(eligible_scores[best_index])
+        if best_score < 0.0:
+            return ""
+
+        best_name = candidate_names[best_index]
+        best_threshold = float(thresholds[best_index])
 
         if best_name:
             self._conn_log.append(

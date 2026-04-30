@@ -16,7 +16,7 @@ from d_noise_cleanup import (
     is_usable_clause_text,
     is_usable_agent_text,
 )
-from d_word_info_map import get_literal_index, literal_from_index
+from d_word_info_map import get_literal_index, literal_from_index, precache_text_vectors
 from linguistic_roles import (
     dependency_relation,
     embedded_statement_text,
@@ -617,7 +617,7 @@ def _connections_from_block(block, query=""):
                 hydrated.append(connection)
         return hydrated
 
-    block_results = []
+    candidates = []
     seen = set()
     clauses = []
     for sentence in _split_sentences(content):
@@ -641,7 +641,19 @@ def _connections_from_block(block, query=""):
         if key in seen:
             continue
         seen.add(key)
-        block_results.append(_connection_from_candidate(candidate, source))
+        candidates.append(candidate)
+
+    vector_warmup = []
+    for candidate in candidates:
+        vector_warmup.append(candidate.get("subject", ""))
+        vector_warmup.append(candidate.get("predicate", ""))
+    if vector_warmup:
+        precache_text_vectors(vector_warmup)
+
+    block_results = [
+        _connection_from_candidate(candidate, source)
+        for candidate in candidates
+    ]
 
     _cache_set(cache_key, [_serialize_connection(connection) for connection in block_results])
     return block_results

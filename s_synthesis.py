@@ -21,6 +21,33 @@ SOURCE_LINE_RE = re.compile(r"^\s*\[\d+\]\s*:?.*$")
 SOURCE_REF_RE = re.compile(r"\[(\d+)\]")
 TEXT_TOKEN_RE = re.compile(r"[a-z0-9]+")
 PAYLOAD_DIVERSITY_THRESHOLD = 0.72
+TEMPLATE_REPORT_HEADINGS = {
+    "abstract",
+    "analysis",
+    "background",
+    "conclusion",
+    "concrete details",
+    "concrete details continued",
+    "discussion",
+    "evidence",
+    "findings",
+    "introduction",
+    "limitations",
+    "relationship evidence",
+    "supporting evidence",
+    "the relationship between target a and target b",
+}
+PIPELINE_LANGUAGE_REPLACEMENTS = (
+    (re.compile(r"\bprovided chain\b", re.IGNORECASE), "available evidence"),
+    (re.compile(r"\bprovided chains\b", re.IGNORECASE), "available evidence"),
+    (re.compile(r"\bargument chain\b", re.IGNORECASE), "evidence"),
+    (re.compile(r"\bargument chains\b", re.IGNORECASE), "evidence"),
+    (re.compile(r"\bevidence block\b", re.IGNORECASE), "evidence"),
+    (re.compile(r"\bevidence blocks\b", re.IGNORECASE), "evidence"),
+    (re.compile(r"\bpayload\b", re.IGNORECASE), "evidence"),
+    (re.compile(r"\brecord\b", re.IGNORECASE), "evidence"),
+    (re.compile(r"\bextracted graph\b", re.IGNORECASE), "evidence"),
+)
 
 class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3B
     def __init__(self, ollama_url=OLLAMA_GENERATE_URL, model=SYNTHESIS_MODEL):
@@ -381,6 +408,25 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
             lines.append(re.sub(r"\bArgument\s+\d+\s*:\s*", "", line, flags=re.IGNORECASE))
         return "\n".join(lines).strip()
 
+    def _strip_template_report_headings(self, text):
+        lines = []
+        for line in str(text or "").splitlines():
+            clean = line.strip()
+            heading = re.match(r"^(#{1,4})\s+(.+)$", clean)
+            if heading:
+                heading_text = self._strip_terminal_source_refs(heading.group(2)).strip(" .:").lower()
+                if heading_text in TEMPLATE_REPORT_HEADINGS:
+                    continue
+            elif clean:
+                heading_text = self._strip_terminal_source_refs(clean).strip(" .:").lower()
+                if heading_text in TEMPLATE_REPORT_HEADINGS:
+                    continue
+            lines.append(line)
+        text = "\n".join(lines).strip()
+        for pattern, replacement in PIPELINE_LANGUAGE_REPLACEMENTS:
+            text = pattern.sub(replacement, text)
+        return re.sub(r"\n{3,}", "\n\n", text).strip()
+
     def _sentence_has_source_ref(self, sentence):
         return bool(re.search(r"\[\d+\](?:\s*\[\d+\])*\s*[.!?]?$", sentence.strip()))
 
@@ -540,7 +586,7 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
             )
         ]
         if not payloads:
-            return f"No successful relationship chains were found between {target_a or 'target A'} and {target_b or 'target B'}."
+            return f"No successful cited relationship was found between {target_a or 'target A'} and {target_b or 'target B'}."
 
         payloads = self._select_diverse_payloads(
             payloads,
@@ -578,14 +624,14 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
             context_text = self._record_chain_text(context_records, source_map=source_map, require_citation=True)
             if not path_text:
                 continue
-            block_parts = [f"Mechanism evidence: {path_text}"]
+            block_parts = [f"Core relationship facts: {path_text}"]
             if context_text:
-                block_parts.append(f"Relevant concrete details: {context_text}")
+                block_parts.append(f"Supporting factual context: {context_text}")
             note_blocks.append("\n".join(block_parts))
 
         digest = "\n\n".join(note_blocks)
         if not digest:
-            return f"No citable relationship chains were found between {target_a or 'target A'} and {target_b or 'target B'}."
+            return f"No citable relationship was found between {target_a or 'target A'} and {target_b or 'target B'}."
         source_lines = "\n".join(
             f"[{idx}]: {source}"
             for source, idx in sorted(source_map.items(), key=lambda item: item[1])
@@ -605,12 +651,19 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
             {source_lines or "(no explicit sources available)"}
 
             Requirements:
-            - Use markdown: start with one neutral `##` title and use `##` section headings if helpful.
+            - Write as a concise analytical report, not as a list of extracted evidence.
+            - Start with one neutral `##` title. After that, avoid section headings unless distinct mechanisms genuinely require them.
+            - Do not use headings named Introduction, Relationship Evidence, Evidence, Supporting Evidence, Concrete Details, Limitations, or Conclusion.
+            - Do not use bullet lists or numbered lists.
+            - The first paragraph must state the strongest thesis the evidence supports about how Target A and Target B are related.
+            - Each body paragraph should follow this pattern: substantive claim, cited evidence, concrete date/number/name if available, and interpretation tying it back to Target A and Target B.
+            - Integrate facts into paragraphs instead of listing them.
             - Do not put source markers on titles or headings.
             - Write directly about Target A, Target B, and the substantive relationship between them.
             - Do not describe your method, the input format, or the fact that evidence was provided.
-            - Use all evidence blocks together; combine them only when they add distinct support.
-            - Treat mechanism evidence as the core sequence and relevant concrete details as supporting facts about entities in that sequence.
+            - Do not use pipeline words such as argument, chain, path, payload, record, evidence block, provided chain, extracted graph, sampled, selected, node, endpoint, or connector.
+            - Use all provided facts together; combine them only when they add distinct support.
+            - Treat core relationship facts as the main support and supporting factual context as extra detail about entities in that relationship.
             - Give more space to mechanisms, concrete figures, dates, named places, and time-bounded comparisons than to definitions.
             - Each paragraph should make one substantive claim grounded in the provided wording.
             - Use only the provided wording to draw conclusions.
@@ -627,13 +680,13 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
             - Do not reuse a source marker unless that sentence relies on that source's evidence.
             - Preserve concrete figures, dates, proper nouns, and source-linked claims exactly as written in the clauses.
             - Prefer concrete figures, dates, monetary amounts, percentages, named places, and named policies when the evidence provides them.
-            - If the evidence does not provide numbers or hard facts for an important part of the relationship, say that the provided chain lacks those specifics instead of inventing them.
+            - If the evidence does not provide numbers or hard facts for an important part of the relationship, say that the available evidence lacks those specifics instead of inventing them.
             - Avoid headings or phrasing like "Argument 1", "Argument 2", "evidence block", "chain", or "record".
             - Include at most one concise definition of Target A or Target B unless multiple definitions materially change the relationship.
             - Write in concise formal prose.
-            - If the evidence is mixed, prefer a measured conclusion such as: the extracted evidence supports a mixed relationship, where one mechanism can move Target B in one direction while broader conditions can move it in another.
-            - If the chains are weak, indirect, or insufficient, say that plainly without using a blunt boilerplate conclusion when a more specific limitation is available.
-            - Do not invent sources, mechanisms, causal claims, or agreement levels that are not in the records.
+            - If the evidence is mixed, prefer a measured conclusion such as: the available evidence supports a mixed relationship, where one mechanism can move Target B in one direction while broader conditions can move it in another.
+            - If the support is weak, indirect, or insufficient, say that plainly without using a blunt boilerplate conclusion when a more specific limitation is available.
+            - Do not invent sources, mechanisms, causal claims, or agreement levels that are not in the provided facts.
             - Do not add notes, implementation comments, or commentary about the report itself.
             - End with a short conclusion about the strongest supported link between Target A and Target B, or state that support is insufficient.
 
@@ -646,7 +699,7 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
                 "prompt": prompt,
                 "stream": True,
                 "options": {
-                    "temperature": 0.1,
+                    "temperature": 0.05,
                     "top_p": 0.5,
                 },
             }
@@ -676,6 +729,7 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
             final_text = self._strip_existing_source_list(final_text)
             final_text = self._normalize_report_heading(final_text)
             final_text = self._strip_argument_labels(final_text)
+            final_text = self._strip_template_report_headings(final_text)
             final_text = self._ensure_sentence_citations(final_text, source_map, evidence_records)
             final_text, used_source_map = self._compact_source_map(final_text, source_map)
             return self._append_source_list(final_text, used_source_map)

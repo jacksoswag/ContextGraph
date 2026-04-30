@@ -9,7 +9,6 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <unordered_map>
 #include <vector>
 
 const int MAX_AGENTS = 64000;
@@ -25,9 +24,6 @@ const float FORCE_TIMESTEP = 0.035f;
 const float BASE_BOUNDS = 520.0f;
 const float BOUNDS_PER_SQRT_AGENT = 30.0f;
 const float SOFT_BOUND_FORCE = 0.0018f;
-const float REPULSION_RADIUS = 20.0f;
-const float REPULSION_STRENGTH = 4.85f;
-const float MAX_REPULSION_FORCE = 6.4f;
 const int MAX_SIMULATION_SECONDS = 22;
 
 // STABILITY PARAMETERS
@@ -57,23 +53,6 @@ struct LC {
   int predicateQuantExact;
   int predicateTenseExact;
   int predicateTruthExact;
-};
-
-struct GridKey {
-  int x, y, z;
-
-  bool operator==(const GridKey &other) const {
-    return x == other.x && y == other.y && z == other.z;
-  }
-};
-
-struct GridKeyHash {
-  size_t operator()(const GridKey &key) const {
-    size_t hx = static_cast<size_t>(key.x) * 73856093u;
-    size_t hy = static_cast<size_t>(key.y) * 19349663u;
-    size_t hz = static_cast<size_t>(key.z) * 83492791u;
-    return hx ^ hy ^ hz;
-  }
 };
 
 static_assert(sizeof(LC) == CONNECTION_RECORD_SIZE,
@@ -134,7 +113,6 @@ int main() {
   std::chrono::steady_clock::time_point physics_start_time;
   std::mt19937 rng(std::random_device{}());
   std::uniform_real_distribution<float> initial_velocity(-0.035f, 0.035f);
-  std::unordered_map<GridKey, std::vector<int>, GridKeyHash> repulsion_grid;
   std::vector<int> active_indices;
 
   // Give every initialized agent a small random starting push so the graph can
@@ -256,79 +234,7 @@ int main() {
       b_pos.vz -= dir.z * force;
     }
 
-    // 2. LOCAL NODE REPULSION
-    repulsion_grid.clear();
-    repulsion_grid.reserve(active_indices.size() * 2);
-    for (int idx : active_indices) {
-      AgentPos &p = pos_buf[idx];
-      GridKey key = {
-          static_cast<int>(std::floor(p.x / REPULSION_RADIUS)),
-          static_cast<int>(std::floor(p.y / REPULSION_RADIUS)),
-          static_cast<int>(std::floor(p.z / REPULSION_RADIUS)),
-      };
-      repulsion_grid[key].push_back(idx);
-    }
-
-    for (int idx : active_indices) {
-      AgentPos &a = pos_buf[idx];
-      GridKey center_key = {
-          static_cast<int>(std::floor(a.x / REPULSION_RADIUS)),
-          static_cast<int>(std::floor(a.y / REPULSION_RADIUS)),
-          static_cast<int>(std::floor(a.z / REPULSION_RADIUS)),
-      };
-
-      for (int dx = -1; dx <= 1; dx++) {
-        for (int dy = -1; dy <= 1; dy++) {
-          for (int dz = -1; dz <= 1; dz++) {
-            GridKey neighbor_key = {
-                center_key.x + dx,
-                center_key.y + dy,
-                center_key.z + dz,
-            };
-            auto it = repulsion_grid.find(neighbor_key);
-            if (it == repulsion_grid.end())
-              continue;
-
-            for (int other_idx : it->second) {
-              if (other_idx <= idx)
-                continue;
-
-              AgentPos &b = pos_buf[other_idx];
-              Vector3 delta = {b.x - a.x, b.y - a.y, b.z - a.z};
-              float dist = Vector3Length(delta);
-              if (dist >= REPULSION_RADIUS)
-                continue;
-
-              Vector3 dir;
-              if (dist < 0.001f) {
-                float angle = static_cast<float>((idx % 997) + 1) * 0.0174533f;
-                dir = {std::cos(angle), std::sin(angle),
-                       std::cos(angle * 0.5f)};
-                dir = Vector3Normalize(dir);
-                dist = 0.001f;
-              } else {
-                dir = Vector3Scale(delta, 1.0f / dist);
-              }
-
-              float proximity = 1.0f - (dist / REPULSION_RADIUS);
-              float force = proximity * proximity * REPULSION_STRENGTH;
-              if (force > MAX_REPULSION_FORCE)
-                force = MAX_REPULSION_FORCE;
-              force *= FORCE_TIMESTEP;
-
-              a.vx -= dir.x * force;
-              a.vy -= dir.y * force;
-              a.vz -= dir.z * force;
-              b.vx += dir.x * force;
-              b.vy += dir.y * force;
-              b.vz += dir.z * force;
-            }
-          }
-        }
-      }
-    }
-
-    // 3. INTEGRATION & ENERGY CALC
+    // 2. INTEGRATION & ENERGY CALC
     total_kinetic_energy = 0.0f;
     for (int idx : active_indices) {
       AgentPos &p = pos_buf[idx];
