@@ -1,0 +1,10 @@
+.env
+venv/
+__pycache__/
+*.pyc
+.cache/
+results/
+word_info_map.sqlite3*
+physics_engine
+thought_engine
+.DS_Store
