@@ -14,7 +14,9 @@ from fastapi.responses import HTMLResponse # type: ignore
 from pydantic import BaseModel # type: ignore
 import uvicorn # type: ignore
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+UI_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = UI_ROOT.parent
+FRONTEND_ROOT = UI_ROOT
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -136,7 +138,7 @@ def _safe_result_dir(result_id):
 
 @app.get("/")
 async def read_index(): # opens index.html when you go to localhost:8000
-    with open("frontend/index.html", "r", encoding="utf-8") as f:
+    with open(FRONTEND_ROOT / "index.html", "r", encoding="utf-8") as f:
         html = f.read()
     html = re.sub(r'href="style\.css(?:\?v=[^"]*)?"', f'href="style.css?v={FRONTEND_ASSET_VERSION}"', html)
     html = re.sub(r'src="main\.js(?:\?v=[^"]*)?"', f'src="main.js?v={FRONTEND_ASSET_VERSION}"', html)
@@ -210,7 +212,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         total_conn_counts[d] = total_conn_counts.get(d, 0) + 1
                         if len(state["connections"]) < MAX_UI_BONDS:
                             state["connections"].append({"s": s, "d": d, "f": f, "utility": utility}) # store connection
-                except: pass
+                except (BufferError, struct.error, ValueError):
+                    pass
 
             if shm_pos:
                 for i in range(MAX_UI_AGENTS): # Read Agents (capped for web performance)
@@ -227,7 +230,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             "degree": degree,
                         }
                         state["agents"].append(agent)
-                    except: break # Caps number of agents rendered to help the renderer, doesn't affect logic
+                    except (BufferError, struct.error, ValueError):
+                        break
 
             # Reads and displays status messages
             if shm_status:
@@ -249,7 +253,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     if report_text:
                         state["report"] = report_text
                         state["report_version"] = hashlib.md5(report_text.encode("utf-8")).hexdigest()
-                except: pass
+                except (BufferError, UnicodeDecodeError):
+                    pass
 
             await websocket.send_json(state)
             await asyncio.sleep(WEBSOCKET_REFRESH_SECONDS) # server/browser communication
@@ -261,7 +266,6 @@ async def websocket_endpoint(websocket: WebSocket):
 class Command(BaseModel): # verifies strict command data format
     target_a: str = ""
     target_b: str = ""
-    tense_preference: str = "none"
 
 @app.post("/command") # post endpoint to dispatch user prompts
 async def post_command(cmd: Command):
@@ -269,9 +273,6 @@ async def post_command(cmd: Command):
 
     target_a = cmd.target_a.strip()
     target_b = cmd.target_b.strip()
-    tense_preference = cmd.tense_preference.strip().lower()
-    if tense_preference not in {"past", "future"}:
-        tense_preference = "none"
     if not target_a or not target_b:
         raise HTTPException(status_code=400, detail="Both targets are required")
 
@@ -284,7 +285,6 @@ async def post_command(cmd: Command):
         "id": str(time.time_ns()),
         "target_a": target_a,
         "target_b": target_b,
-        "tense_preference": tense_preference,
     }
     payload_text = json.dumps(payload, separators=(",", ":"))
     cmd_bytes = payload_text.encode("utf-8")
@@ -301,10 +301,9 @@ async def post_command(cmd: Command):
         "command_id": payload["id"],
         "target_a": target_a,
         "target_b": target_b,
-        "tense_preference": tense_preference,
     }
 
-app.mount("/", StaticFiles(directory="frontend"), name="frontend") # Mount static files so style.css and main.js are accessible
+app.mount("/", StaticFiles(directory=str(FRONTEND_ROOT)), name="frontend") # Mount static files so style.css and main.js are accessible
 
 if __name__ == "__main__": # entry point, runs the server
     uvicorn.run(app, host=DASHBOARD_HOST, port=DASHBOARD_PORT)

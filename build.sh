@@ -11,8 +11,8 @@ ROOT_DIR="$(pwd)"
 
 #  0. Cleanup Stale Processes
 echo "[BUILD] Cleaning up any stale instances..."
-killall -9 SKS_Renderer &>/dev/null || true
 killall -9 physics_engine &>/dev/null || true
+killall -9 thought_engine &>/dev/null || true
 pkill -9 -f "python main.py" &>/dev/null || true
 pkill -9 -f "python3 main.py" &>/dev/null || true
 
@@ -59,6 +59,10 @@ elif ! ./venv/bin/python3 --version 2>&1 | grep -q "3.11"; then
     echo "[DEPS] Existing venv is not Python 3.11. Recreating..."
     rm -rf venv
     RECREATE_VENV=true
+elif [[ ! -f "venv/bin/activate" ]]; then
+    echo "[DEPS] Existing venv is missing venv/bin/activate. Recreating..."
+    rm -rf venv
+    RECREATE_VENV=true
 fi
 
 if [[ "$RECREATE_VENV" == "true" ]]; then
@@ -68,6 +72,11 @@ if [[ "$RECREATE_VENV" == "true" ]]; then
         eval "$(/opt/homebrew/bin/brew shellenv)"
     fi
     python3.11 -m venv venv
+fi
+
+if [[ ! -f "venv/bin/activate" ]]; then
+    echo "[DEPS] ERROR: venv/bin/activate was not created." >&2
+    exit 1
 fi
 source venv/bin/activate
 
@@ -89,9 +98,8 @@ echo "  Dependencies ready. Starting services + build..."
 
 #  6. Cleanup previous run
 echo "[BUILD] Cleaning up previous session..."
-killall -9 SKS_Renderer 2>/dev/null || true
 killall -9 physics_engine 2>/dev/null || true
-rm -f /tmp/sks_shm /tmp/sks_roles
+killall -9 thought_engine 2>/dev/null || true
 
 #  7. Ollama: start if not already serving
 echo "[BUILD] Checking Ollama server..."
@@ -124,15 +132,7 @@ done
 echo "[BUILD] Ollama models ✓"
 
 
-#  8.5 Download Premium Typography (Inter Font)
-if [ ! -f "Inter-Medium.ttf" ]; then
-    echo "[DEPS] Downloading Inter typography..."
-    curl -sfL "https://github.com/google/fonts/raw/main/ofl/inter/static/Inter-Medium.ttf" -o "Inter-Medium.ttf" || \
-    curl -sfL "https://rsms.me/inter/font-files/Inter-Medium.otf" -o "Inter-Medium.ttf" || \
-    echo "[WARN] Could not download Inter font. Falling back to default."
-fi
-
-#  8.6 Cache-bust frontend assets so the browser does not reuse stale UI code
+#  8.5 Cache-bust frontend assets so the browser does not reuse stale UI code
 echo "[BUILD] Refreshing frontend asset version..."
 ASSET_VERSION="$(date +%s)"
 ASSET_VERSION="$ASSET_VERSION" python3 - <<'PY'
@@ -156,15 +156,18 @@ g++ -O3 -std=c++17 \
     -framework CoreVideo -framework IOKit -framework Cocoa -framework OpenGL \
     p_physics.cpp -o physics_engine
 
+echo "[BUILD] p_thought.cpp -> thought_engine"
+g++ -O3 -std=c++17 p_thought.cpp -o thought_engine
+
 echo "[BUILD] Build complete."
 
 #  10. Shutdown hook
 cleanup() {
     echo ""
-    echo "[SHUTDOWN] Killing renderer and python workers..."
-    killall -9 SKS_Renderer &>/dev/null || true
+    echo "[SHUTDOWN] Killing engine workers..."
     killall -9 physics_engine &>/dev/null || true
-    pkill -9 -f "python3.11" &>/dev/null || true
+    killall -9 thought_engine &>/dev/null || true
+    pkill -9 -f "$ROOT_DIR/frontend/ui.py" &>/dev/null || true
     echo "[SHUTDOWN] Done."
 }
 trap cleanup EXIT

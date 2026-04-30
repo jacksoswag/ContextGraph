@@ -1,311 +1,671 @@
-from d_clause_extractor import extract_clauses
-from constants import MAX_CONNECTIONS_PER_QUERY
-from d_temporal_context import resolve_temporal_context
-from d_word_info_map import (
-    contextual_component_vector,
-    contextual_component_vectors,
-    existing_concept_index,
-    get_index,
-    get_literal_index,
+import hashlib
+import json
+import re
+import sqlite3
+import threading
+import time
+from pathlib import Path
+from urllib.parse import urlparse
+
+from constants import EXTRACTION_CLAUSE_LIMIT, EXTRACTION_SENTENCE_LIMIT
+from d_noise_cleanup import (
+    MAX_AGENT_TOKENS,
+    clean_clause_text,
+    clean_source_text,
+    clean_text,
+    is_usable_clause_text,
+    is_usable_agent_text,
+)
+from d_word_info_map import get_literal_index, literal_from_index
+from linguistic_roles import (
+    dependency_relation,
+    embedded_statement_text,
+    looks_like_relation_word,
+    parsed_tense,
+    preparse_texts,
 )
 from o_connection import ConnectionEndpoint
 
-def _clean_text(text):
-    return " ".join(str(text or "").strip().split())
 
-def _literal_index(text, clause_text=""):
-    cleaned = _clean_text(text)
-    if not cleaned:
-        return -1
-    return int(get_literal_index(cleaned))
+SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+CLAUSE_SPLIT_RE = re.compile(
+    r"\s*(?:;|,\s+(?:and|or|but|so|while|whereas|although|though)\s+|\s+\b(?:and|or|but|so|while|whereas|although|though)\b\s+)\s*",
+    re.IGNORECASE,
+)
+TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)?")
+NUMBER_RE = re.compile(
+    r"(?:\$|€|£)?\b\d[\d,]*(?:\.\d+)?(?:\s?(?:%|percent|dollars?|euros?|pounds?|million|billion|thousand))?(?=\W|$)",
+    re.IGNORECASE,
+)
+DATE_RE = re.compile(
+    r"\bQ[1-4]\s+(?:18|19|20|21)\d{2}\b|"
+    r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|"
+    r"Dec(?:ember)?)(?:\s+\d{1,2})?(?:,\s*)?\s+(?:18|19|20|21)\d{2}\b|"
+    r"\b(?:18|19|20|21)\d{2}\b",
+    re.IGNORECASE,
+)
 
-def _literal_indices(words, clause_text=""):
-    values = []
-    seen = set()
-    for word in words or []:
-        index = _literal_index(word, clause_text=clause_text)
-        if index < 0 or index in seen:
+LINKING_PATTERN = re.compile(
+    r"^(?P<subject>.+?)\s+"
+    r"(?P<relation>is|are|was|were|becomes?|became|has|have|had|will have|will be)"
+    r"\s+(?P<predicate>.+)$",
+    re.IGNORECASE,
+)
+RELATION_STOPWORDS = {
+    "and",
+    "are",
+    "but",
+    "for",
+    "from",
+    "has",
+    "have",
+    "into",
+    "not",
+    "that",
+    "the",
+    "this",
+    "was",
+    "were",
+    "with",
+}
+SUBJECT_PREFIXES = re.compile(
+    r"^(?:according to|in|on|at|during|after|before|because|that|when|where|while|although|though|whereas)\b\s+",
+    re.IGNORECASE,
+)
+TRAILING_NOISE_RE = re.compile(
+    r"\s+(?:according to|via|source:|read more|learn more)\b.*$",
+    re.IGNORECASE,
+)
+MODIFIER_CUE_RE = re.compile(
+    r"\b(?:about|above|according to|across|after|against|along|although|among|around|as of|at|"
+    r"based on|because|because of|before|below|between|by|despite|during|for|from|"
+    r"in|including|inside|into|near|of|on|over|per|through|to|under|using|"
+    r"via|where|whereas|when|while|with|within|without)\b",
+    re.IGNORECASE,
+)
+LEADING_MODIFIER_RE = re.compile(
+    rf"^(?P<modifier>{MODIFIER_CUE_RE.pattern}[^,;]{{0,120}})[,;]\s*(?P<core>.+)$",
+    re.IGNORECASE,
+)
+TRAILING_MODIFIER_RE = re.compile(
+    rf"^(?P<core>.+?)\s+(?P<modifier>{MODIFIER_CUE_RE.pattern}\s+.+)$",
+    re.IGNORECASE,
+)
+EXTRACTION_CACHE_VERSION = "logic-extractor-v5"
+EXTRACTION_CACHE_PATH = Path(__file__).resolve().parent / ".cache" / "extraction_cache.sqlite3"
+_EXTRACTION_CACHE_LOCK = threading.RLock()
+_EXTRACTION_CACHE_CONNECTIONS = {}
+
+
+def _cache_connection():
+    cache_key = (threading.get_ident(), str(EXTRACTION_CACHE_PATH))
+    conn = _EXTRACTION_CACHE_CONNECTIONS.get(cache_key)
+    if conn is None:
+        EXTRACTION_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(EXTRACTION_CACHE_PATH, timeout=30.0, isolation_level=None)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS extraction_cache (
+                cache_key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                created REAL NOT NULL
+            )
+            """
+        )
+        _EXTRACTION_CACHE_CONNECTIONS[cache_key] = conn
+    return conn
+
+
+def _block_cache_key(content, source):
+    digest = hashlib.sha256()
+    digest.update(EXTRACTION_CACHE_VERSION.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(clean_text(source).encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(clean_text(content).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _cache_get(key):
+    try:
+        row = _cache_connection().execute(
+            "SELECT value FROM extraction_cache WHERE cache_key=?",
+            (key,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        return json.loads(row[0])
+    except json.JSONDecodeError:
+        return None
+
+
+def _cache_set(key, value):
+    try:
+        encoded = json.dumps(value)
+    except TypeError:
+        return
+    try:
+        with _EXTRACTION_CACHE_LOCK:
+            _cache_connection().execute(
+                """
+                INSERT OR REPLACE INTO extraction_cache(cache_key, value, created)
+                VALUES(?, ?, ?)
+                """,
+                (key, encoded, time.time()),
+            )
+    except sqlite3.Error:
+        return
+
+
+def _clean_part(text):
+    text = clean_text(text)
+    text = TRAILING_NOISE_RE.sub("", text)
+    text = re.sub(r"^[,.:;()\[\]\s]+|[,.:;()\[\]\s]+$", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _literal_text(index):
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        return ""
+    return literal_from_index(index) if index >= 0 else ""
+
+
+def _serialize_endpoint(endpoint):
+    return {
+        "quantifier": _literal_text(getattr(endpoint, "quantifier", -1)),
+        "tense": _literal_text(getattr(endpoint, "tense", -1)),
+        "truth": int(getattr(endpoint, "truth", -1)),
+        "asu": endpoint.asu_value() if isinstance(endpoint, ConnectionEndpoint) else "",
+        "modifiers": endpoint.modifier_value() if isinstance(endpoint, ConnectionEndpoint) else [],
+    }
+
+
+def _endpoint_from_payload(payload):
+    payload = dict(payload or {})
+    quantifier = get_literal_index(payload.get("quantifier", "")) if payload.get("quantifier") else -1
+    tense = get_literal_index(payload.get("tense", "")) if payload.get("tense") else -1
+    modifiers = [
+        ConnectionEndpoint.register_modifier(value)
+        for value in list(payload.get("modifiers", []) or [])
+    ]
+    return ConnectionEndpoint(
+        quantifier=quantifier,
+        tense=tense,
+        truth=int(payload.get("truth", -1)),
+        ASU_idx=payload.get("asu", ""),
+        modifier_idx=[idx for idx in modifiers if idx >= 0],
+    )
+
+
+def _serialize_connection(connection):
+    return {
+        "subject": _serialize_endpoint(connection.get("subject")),
+        "predicate": _serialize_endpoint(connection.get("predicate")),
+        "connection": _literal_text(connection.get("connection")),
+        "source": connection.get("source", "unknown"),
+        "text": connection.get("text", ""),
+        "subject_specifics": connection.get("subject_specifics", []),
+        "predicate_specifics": connection.get("predicate_specifics", []),
+        "connection_specifics": connection.get("connection_specifics", []),
+    }
+
+
+def _connection_from_payload(payload):
+    payload = dict(payload or {})
+    relation = _clean_part(payload.get("connection", ""))
+    if not relation:
+        return None
+    subject = _endpoint_from_payload(payload.get("subject", {}))
+    predicate = _endpoint_from_payload(payload.get("predicate", {}))
+    if not subject.asu_value() or not predicate.asu_value():
+        return None
+    return {
+        "subject": subject,
+        "predicate": predicate,
+        "connection": get_literal_index(relation),
+        "source": payload.get("source", "unknown"),
+        "text": payload.get("text", ""),
+        "subject_specifics": payload.get("subject_specifics", []),
+        "predicate_specifics": payload.get("predicate_specifics", []),
+        "connection_specifics": payload.get("connection_specifics", []),
+    }
+
+
+def _source_for_block(block):
+    raw_tag = clean_source_text((block or {}).get("tag", ""))
+    url = _clean_url((block or {}).get("url", ""))
+    if "|" in raw_tag:
+        title, embedded_url = raw_tag.rsplit("|", 1)
+        tag = _clean_part(title)
+        url = url or _clean_url(embedded_url)
+    else:
+        tag = _clean_part(raw_tag)
+    if tag and url:
+        return f"{tag}|{url}"
+    return url or tag or "unknown"
+
+
+def _clean_url(url):
+    url = str(url or "").strip().strip("\"'<>[]()")
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return url
+
+
+def _split_sentences(text):
+    pieces = []
+    for sentence in SENTENCE_RE.split(str(text or "")):
+        clean = clean_clause_text(sentence)
+        if clean:
+            pieces.append(clean.rstrip(".!?"))
+        if len(pieces) >= EXTRACTION_SENTENCE_LIMIT:
+            break
+    return pieces
+
+
+def _split_clauses(sentence):
+    clauses = []
+    for clause in CLAUSE_SPLIT_RE.split(sentence):
+        clean = clean_clause_text(clause)
+        if not clean:
             continue
-        seen.add(index)
-        values.append(index)
-    return values
+        clauses.append(clean.rstrip(".!?"))
+        if len(clauses) >= EXTRACTION_CLAUSE_LIMIT:
+            break
+    return clauses
 
-def _first_literal(words, clause_text=""):
-    for word in words or []:
-        index = _literal_index(word, clause_text=clause_text)
-        if index >= 0:
-            return index
+
+def _truth_for_clause(clause):
+    lower = f" {clause.lower()} "
+    return 0 if re.search(r"\b(no|not|never|without|failed to|fails to)\b", lower) else 1
+
+
+def _tense_for_relation(relation, clause):
+    return get_literal_index(parsed_tense(clause, relation))
+
+
+def _quantifier_for_subject(subject):
+    lower = str(subject or "").lower()
+    for quantifier in ("all", "some", "many", "most", "several", "few", "one"):
+        if re.search(rf"\b{quantifier}\b", lower):
+            return get_literal_index(quantifier)
     return -1
 
-def _concept_index(text, clause_text=""):
-    cleaned = _clean_text(text)
-    if not cleaned:
-        return -1
-    return int(get_index(cleaned, contextual_component_vector(cleaned, clause_text)))
 
-def _concept_index_with_vector(text, vect):
-    cleaned = _clean_text(text)
-    if not cleaned:
-        return -1
-    return int(get_index(cleaned, vect))
+def _modifier_ids(text):
+    modifiers = []
+    for value in DATE_RE.findall(text):
+        idx = ConnectionEndpoint.register_modifier(value)
+        if idx >= 0 and idx not in modifiers:
+            modifiers.append(idx)
+    for value in NUMBER_RE.findall(text):
+        if re.fullmatch(r"(?:18|19|20|21)\d{2}", _clean_part(value)):
+            continue
+        idx = ConnectionEndpoint.register_modifier(value)
+        if idx >= 0 and idx not in modifiers:
+            modifiers.append(idx)
+    return modifiers[:4]
 
-def _strip_leading_quantifier(surface, quantifier_words):
-    tokens = _clean_text(surface).split()
-    quantifier_tokens = [_clean_text(word).lower() for word in quantifier_words or [] if _clean_text(word)]
-    if quantifier_tokens and len(tokens) >= len(quantifier_tokens):
-        leading = [token.lower() for token in tokens[: len(quantifier_tokens)]]
-        if leading == quantifier_tokens:
-            tokens = tokens[len(quantifier_tokens) :]
-    return _clean_text(" ".join(tokens))
 
-def _component_core_text(meta):
-    meta = dict(meta or {})
-    core = _strip_leading_quantifier(
-        meta.get("core", ""),
-        meta.get("quantifier_words", []),
+def _add_modifier(modifiers, value):
+    clean = _clean_part(value)
+    clean = re.sub(
+        rf"^{MODIFIER_CUE_RE.pattern}\s+(?={MODIFIER_CUE_RE.pattern}\b)",
+        "",
+        clean,
+        flags=re.IGNORECASE,
     )
-    surface = _strip_leading_quantifier(
-        meta.get("surface", ""),
-        meta.get("quantifier_words", []),
-    )
-    head = _clean_text(meta.get("head", ""))
-    return core or surface or head
-
-def _relation_index(record):
-    relation_meta = dict(record.get("relation_meta") or {})
-    clause_text = _clean_text(record.get("text", ""))
-    relation_lemma = _clean_text(
-        relation_meta.get("head")
-        or record.get("two_place_predicate")
-    )
-    if not relation_lemma:
-        return -1
-    return _literal_index(relation_lemma, clause_text=clause_text)
-
-def _simple_truth_literal(meta, clause_text=""):
-    meta = dict(meta or {})
-    return _first_literal(meta.get("truth_words", []), clause_text=clause_text)
-
-def _concept_id_from_prepared(text, clause_text, concept_vectors=None, existing_concepts=None):
-    cleaned = _clean_text(text)
-    if not cleaned:
-        return -1
-    existing = (existing_concepts or {}).get(cleaned)
-    if existing is not None and existing >= 0:
-        return existing
-    vector = (concept_vectors or {}).get((cleaned, clause_text))
-    if vector is not None:
-        return _concept_index_with_vector(cleaned, vector)
-    return _concept_index(cleaned, clause_text=clause_text)
+    clean = re.sub(rf"\s+{MODIFIER_CUE_RE.pattern}$", "", clean, flags=re.IGNORECASE)
+    if not clean:
+        return
+    idx = ConnectionEndpoint.register_modifier(clean)
+    if idx >= 0 and idx not in modifiers:
+        modifiers.append(idx)
 
 
-def _build_subject_sp(record, concept_vectors=None, existing_concepts=None):
-    subject_meta = dict(record.get("subject_meta") or {})
-    clause_text = _clean_text(record.get("text", ""))
-    concept_text = _component_core_text(subject_meta)
-    modifier_ids = _literal_indices(subject_meta.get("noun_modifiers", []), clause_text=clause_text)
-    tense_id = _first_literal(subject_meta.get("tense_words", []), clause_text=clause_text)
-    relation_meta = dict(record.get("relation_meta") or {})
-    truth_id = _simple_truth_literal(relation_meta, clause_text=clause_text)
-    if tense_id < 0:
-        tense_id = _first_literal(relation_meta.get("tense_words", []), clause_text=clause_text)
+def _drop_specific_literals(text):
+    text = DATE_RE.sub(" ", text)
+    text = NUMBER_RE.sub(" ", text)
+    return _clean_part(text)
 
-    return ConnectionEndpoint(
-        quantifier=_first_literal(subject_meta.get("quantifier_words", []), clause_text=clause_text),
-        tense=tense_id,
-        truth=truth_id,
-        ASU_idx=_concept_id_from_prepared(
-            concept_text,
-            clause_text,
-            concept_vectors=concept_vectors,
-            existing_concepts=existing_concepts,
-        ),
-        modifier_idx=modifier_ids,
-    )
 
-def _build_predicate_sp(record, concept_vectors=None, existing_concepts=None):
-    clause_text = _clean_text(record.get("text", ""))
-    predicate_meta = dict(record.get("predicate_meta") or {})
-    relation_meta = dict(record.get("relation_meta") or {})
-    concept_text = _component_core_text(predicate_meta)
-    modifier_ids = _literal_indices(predicate_meta.get("noun_modifiers", []), clause_text=clause_text)
-    return ConnectionEndpoint(
-        quantifier=_first_literal(predicate_meta.get("quantifier_words", []), clause_text=clause_text),
-        tense=_first_literal(relation_meta.get("tense_words", []), clause_text=clause_text),
-        truth=_simple_truth_literal(relation_meta, clause_text=clause_text),
-        ASU_idx=_concept_id_from_prepared(
-            concept_text,
-            clause_text,
-            concept_vectors=concept_vectors,
-            existing_concepts=existing_concepts,
-        ),
-        modifier_idx=modifier_ids,
-    )
+def _strip_embedded_statement_clause(text, modifiers):
+    statement = embedded_statement_text(text)
+    if not statement:
+        return text
+    prefix = text[: max(0, str(text).find(statement))].strip()
+    if prefix:
+        _add_modifier(modifiers, prefix)
+    return statement
 
-def _connection_record(record, concept_vectors=None, existing_concepts=None):
-    subject_sp = _build_subject_sp(
-        record,
-        concept_vectors=concept_vectors,
-        existing_concepts=existing_concepts,
-    )
-    predicate_sp = _build_predicate_sp(
-        record,
-        concept_vectors=concept_vectors,
-        existing_concepts=existing_concepts,
-    )
-    try:
-        relation_index = int(record.get("_relation_index", -1))
-    except (TypeError, ValueError):
-        relation_index = -1
-    if relation_index < 0:
-        relation_index = _relation_index(record)
-    clause_text = _clean_text(record.get("text", ""))
-    temporal_context = _connection_temporal_context(record, clause_text)
-    connection_specifics = [temporal_context] if temporal_context else []
+
+def _shorten_core(text):
+    text = _clean_part(text)
+    text = SUBJECT_PREFIXES.sub("", text)
+    text = re.sub(r"^(?:the|a|an)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(?:all|some|many|most|several|few|one)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+\b(?:do|does|did|can|could|may|might|must|should|would|will)\s+(?:not\s*)?$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+(?:that|which|who)\s*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(rf"^{MODIFIER_CUE_RE.pattern}\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(rf"\s+{MODIFIER_CUE_RE.pattern}$", "", text, flags=re.IGNORECASE)
+    tokens = TOKEN_RE.findall(text)
+    if len(tokens) > MAX_AGENT_TOKENS:
+        text = " ".join(tokens[-MAX_AGENT_TOKENS:])
+    return _clean_part(text)
+
+
+def _endpoint_payload(text, source, fallback_core=""):
+    original = _clean_part(text)
+    modifiers = _modifier_ids(original)
+    specifics = _specifics(original, source)
+    core = _drop_specific_literals(original)
+
+    match = LEADING_MODIFIER_RE.match(core)
+    if match:
+        _add_modifier(modifiers, match.group("modifier"))
+        core = _clean_part(match.group("core"))
+
+    core = _strip_embedded_statement_clause(core, modifiers)
+
+    match = TRAILING_MODIFIER_RE.match(core)
+    if match:
+        _add_modifier(modifiers, match.group("modifier"))
+        core = _clean_part(match.group("core"))
+
+    core = _shorten_core(core) or _shorten_core(fallback_core) or _shorten_core(original)
     return {
-        "subject": subject_sp,
-        "connection": relation_index,
-        "predicate": predicate_sp,
-        "text": clause_text,
-        "source": _clean_text(record.get("source", "")) or "unknown",
-        "subject_specifics": [],
-        "predicate_specifics": [],
-        "connection_specifics": connection_specifics,
-        "truth": 1,
+        "core": core,
+        "modifier_ids": modifiers[:4],
+        "specifics": specifics,
     }
 
 
-def _connection_temporal_context(record, clause_text):
-    relation_meta = dict(record.get("relation_meta") or {})
-    subject_meta = dict(record.get("subject_meta") or {})
-    predicate_meta = dict(record.get("predicate_meta") or {})
-    tense_words = (
-        list(relation_meta.get("tense_words", []) or [])
-        + list(subject_meta.get("tense_words", []) or [])
-        + list(predicate_meta.get("tense_words", []) or [])
+def _specifics(text, source):
+    specifics = []
+    seen = set()
+    for match in DATE_RE.findall(text):
+        clean = _clean_part(match)
+        key = ("date", clean.lower())
+        if clean and key not in seen:
+            seen.add(key)
+            specifics.append({"kind": "date", "text": clean, "source": source})
+    for match in NUMBER_RE.findall(text):
+        clean = _clean_part(match)
+        if re.fullmatch(r"(?:18|19|20|21)\d{2}", clean):
+            continue
+        key = ("number", clean.lower())
+        if clean and key not in seen:
+            seen.add(key)
+            specifics.append({"kind": "amount", "text": clean, "source": source})
+    return specifics
+
+
+def _trim_endpoint(text):
+    return _endpoint_payload(text, "", fallback_core=text)["core"]
+
+
+def _is_amount_tail(predicate_raw, relation):
+    clean = _clean_part(predicate_raw)
+    if not clean:
+        return False
+    amount_match = NUMBER_RE.search(clean)
+    if amount_match and amount_match.start() <= 16:
+        return True
+    leading_modifier_amount = re.match(
+        rf"^{MODIFIER_CUE_RE.pattern}\s+(?:{NUMBER_RE.pattern}|{DATE_RE.pattern})",
+        clean,
+        flags=re.IGNORECASE,
     )
-    temporal = resolve_temporal_context(
-        clause_text,
-        source=_clean_text(record.get("source", "")),
-        tense_words=tense_words,
-    )
-    if (
-        temporal.get("original_tense") == "unknown"
-        and not temporal.get("source_year")
-        and not temporal.get("event_year")
-    ):
+    if leading_modifier_amount:
+        return True
+    if relation in {"is", "are", "was", "were", "become", "becomes", "became", "has", "have", "had"}:
+        return bool(re.match(rf"^(?:{NUMBER_RE.pattern}|{DATE_RE.pattern})", clean, flags=re.IGNORECASE))
+    return False
+
+
+def _looks_like_action_verb(token):
+    token = token.lower()
+    if token in RELATION_STOPWORDS:
+        return False
+    return looks_like_relation_word(token)
+
+
+def _candidate(subject_raw, relation, predicate_raw, clause):
+    subject = _trim_endpoint(subject_raw)
+    if _is_amount_tail(predicate_raw, relation):
+        predicate = f"{relation} amount"
+    else:
+        predicate = _trim_endpoint(predicate_raw)
+    if NUMBER_RE.match(predicate):
+        predicate = f"{relation} amount"
+    if not is_usable_agent_text(subject) or not is_usable_agent_text(predicate):
         return None
-    return temporal
+    if subject.lower() == predicate.lower():
+        return None
+    return {
+        "subject": subject,
+        "subject_raw": _clean_part(subject_raw),
+        "relation": _clean_part(relation).lower(),
+        "predicate": predicate,
+        "predicate_raw": _clean_part(predicate_raw),
+        "clause": clean_clause_text(clause),
+    }
 
 
-def _connection_key(connection):
-    subject_sp = connection["subject"]
-    predicate_sp = connection["predicate"]
-    return (
-        subject_sp.sp_id,
-        connection["connection"],
-        predicate_sp.sp_id,
-        subject_sp.quantifier,
-        subject_sp.tense,
-        subject_sp.truth,
-        tuple(subject_sp.modifier_idx),
-        predicate_sp.quantifier,
-        predicate_sp.tense,
-        predicate_sp.truth,
-        tuple(predicate_sp.modifier_idx),
-    )
-
-
-def _candidate_records(records, connection_limit):
-    if connection_limit is not None and connection_limit <= 0:
-        return []
-
-    candidates = []
-    seen = set()
-    for record in records:
-        subject_text = _component_core_text(record.get("subject_meta") or {})
-        predicate_text = _component_core_text(record.get("predicate_meta") or {})
-        relation_id = _relation_index(record)
-        if not subject_text or not predicate_text or relation_id < 0:
-            continue
-
-        signature = (
-            subject_text.lower(),
-            relation_id,
-            predicate_text.lower(),
-            _clean_text(record.get("text", "")).lower(),
+def _candidate_from_action_clause(clean):
+    matches = list(TOKEN_RE.finditer(clean))
+    if len(matches) < 3:
+        return None
+    statement = embedded_statement_text(clean)
+    if statement and statement != clean:
+        nested = _candidate_from_clause(statement)
+        if nested is not None:
+            return nested
+    dependency_candidate = dependency_relation(clean)
+    if dependency_candidate is not None:
+        candidate = _candidate(
+            dependency_candidate["subject_raw"],
+            dependency_candidate["relation"],
+            dependency_candidate["predicate_raw"],
+            clean,
         )
-        if signature in seen:
+        if candidate is not None:
+            return candidate
+    action_matches = [
+        (idx, match)
+        for idx, match in enumerate(matches[1:-1], 1)
+        if _looks_like_action_verb(match.group(0))
+    ]
+    last_break = max(clean.rfind(","), clean.rfind(";"))
+    action_matches.sort(key=lambda item: (item[1].start() <= last_break, item[1].start()))
+    for idx, match in action_matches:
+        relation = match.group(0).lower()
+        if not _looks_like_action_verb(relation):
             continue
-        seen.add(signature)
+        predicate_raw = clean[matches[idx].end():]
+        candidate = _candidate(clean[:matches[idx].start()], relation, predicate_raw, clean)
+        if candidate is None:
+            continue
+        return candidate
+    return None
 
-        prepared = dict(record)
-        prepared["_relation_index"] = relation_id
-        candidates.append(prepared)
-        if connection_limit is not None and len(candidates) >= connection_limit * 2:
+
+def _candidate_from_clause(clause):
+    clean = clean_clause_text(clause).rstrip(".!?")
+    if len(TOKEN_RE.findall(clean)) < 3:
+        return None
+
+    statement = embedded_statement_text(clean)
+    if statement and statement != clean:
+        nested = _candidate_from_clause(statement)
+        if nested is not None:
+            return nested
+
+    dependency_candidate = dependency_relation(clean)
+    if dependency_candidate is not None:
+        candidate = _candidate(
+            dependency_candidate["subject_raw"],
+            dependency_candidate["relation"],
+            dependency_candidate["predicate_raw"],
+            clean,
+        )
+        if candidate is not None:
+            return candidate
+
+    match = LINKING_PATTERN.match(clean)
+    if not match:
+        return _candidate_from_action_clause(clean)
+
+    relation = _clean_part(match.group("relation")).lower()
+    if len(relation) < 2:
+        return None
+    return _candidate(match.group("subject"), relation, match.group("predicate"), clean)
+
+
+def _connection_from_candidate(candidate, source):
+    relation = candidate["relation"]
+    clause = candidate["clause"]
+    truth = _truth_for_clause(clause)
+    tense = _tense_for_relation(relation, clause)
+    subject_payload = _endpoint_payload(
+        candidate.get("subject_raw") or candidate["subject"],
+        source,
+        fallback_core=candidate["subject"],
+    )
+    predicate_payload = _endpoint_payload(
+        candidate.get("predicate_raw") or candidate["predicate"],
+        source,
+        fallback_core=candidate["predicate"],
+    )
+    if _is_amount_tail(candidate.get("predicate_raw") or "", relation):
+        predicate_payload["core"] = candidate["predicate"]
+    subject = subject_payload["core"]
+    predicate = predicate_payload["core"]
+    subject_specifics = subject_payload["specifics"]
+    predicate_specifics = predicate_payload["specifics"]
+    connection_specifics = _specifics(clause, source)
+    return {
+        "subject": ConnectionEndpoint(
+            quantifier=_quantifier_for_subject(candidate.get("subject_raw") or subject),
+            tense=tense,
+            truth=truth,
+            ASU_idx=subject,
+            modifier_idx=subject_payload["modifier_ids"],
+        ),
+        "predicate": ConnectionEndpoint(
+            quantifier=_quantifier_for_subject(candidate.get("predicate_raw") or predicate),
+            tense=tense,
+            truth=truth,
+            ASU_idx=predicate,
+            modifier_idx=predicate_payload["modifier_ids"],
+        ),
+        "connection": get_literal_index(relation),
+        "source": source,
+        "text": clause,
+        "subject_specifics": subject_specifics,
+        "predicate_specifics": predicate_specifics,
+        "connection_specifics": connection_specifics,
+    }
+
+
+def _block_fingerprint(block):
+    content = clean_text((block or {}).get("content", ""))
+    url = _clean_url((block or {}).get("url", ""))
+    source = _source_for_block(block)
+    if url:
+        return ("url", url, hashlib.sha1(content.encode("utf-8")).hexdigest())
+    return ("content", hashlib.sha1(f"{source}\0{content}".encode("utf-8")).hexdigest())
+
+
+def _unique_blocks(blocks):
+    unique = []
+    seen = set()
+    for block in list(blocks or []):
+        content = clean_text((block or {}).get("content", ""))
+        if not content:
+            continue
+        fingerprint = _block_fingerprint(block)
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        unique.append(block)
+    return unique
+
+
+def _connections_from_block(block, query=""):
+    content = clean_text((block or {}).get("content", ""))
+    if not content:
+        return []
+    source = _source_for_block(block) or query or "unknown"
+    cache_key = _block_cache_key(content, source)
+    cached = _cache_get(cache_key)
+    if isinstance(cached, list):
+        hydrated = []
+        for item in cached:
+            connection = _connection_from_payload(item)
+            if connection is not None:
+                hydrated.append(connection)
+        return hydrated
+
+    block_results = []
+    seen = set()
+    clauses = []
+    for sentence in _split_sentences(content):
+        clauses.extend(_split_clauses(sentence))
+        if len(clauses) >= EXTRACTION_CLAUSE_LIMIT:
+            clauses = clauses[:EXTRACTION_CLAUSE_LIMIT]
             break
-    return candidates
+    clauses = [clause for clause in clauses if is_usable_clause_text(clause)]
+    preparse_texts(clauses)
 
-
-def find_connections(blocks, query="", connection_limit=MAX_CONNECTIONS_PER_QUERY):
-    if connection_limit is not None and connection_limit <= 0:
-        return []
-
-    connections = []
-    seen = set()
-    records = _candidate_records(
-        extract_clauses(blocks, query=query),
-        connection_limit,
-    )
-    vector_keys = []
-    seen_vector_keys = set()
-    concept_texts = []
-    seen_concept_texts = set()
-    for record in records:
-        clause_text = _clean_text(record.get("text", ""))
-        for meta_key in ("subject_meta", "predicate_meta"):
-            concept_text = _component_core_text(record.get(meta_key) or {})
-            if not concept_text:
-                continue
-            if concept_text not in seen_concept_texts:
-                seen_concept_texts.add(concept_text)
-                concept_texts.append(concept_text)
-
-    existing_concepts = {
-        concept_text: existing_concept_index(concept_text)
-        for concept_text in concept_texts
-    }
-
-    for record in records:
-        clause_text = _clean_text(record.get("text", ""))
-        for meta_key in ("subject_meta", "predicate_meta"):
-            concept_text = _component_core_text(record.get(meta_key) or {})
-            key = (concept_text, clause_text)
-            if concept_text and existing_concepts.get(concept_text, -1) < 0 and key not in seen_vector_keys:
-                seen_vector_keys.add(key)
-                vector_keys.append(key)
-
-    vectors = contextual_component_vectors(vector_keys)
-    concept_vectors = {
-        key: vector
-        for key, vector in zip(vector_keys, vectors)
-    }
-
-    for record in records:
-        connection = _connection_record(
-            record,
-            concept_vectors=concept_vectors,
-            existing_concepts=existing_concepts,
-        )
-        subject_sp = connection["subject"]
-        predicate_sp = connection["predicate"]
-        if subject_sp.sp_id < 0 or predicate_sp.sp_id < 0 or connection["connection"] < 0:
+    for clause in clauses:
+        candidate = _candidate_from_clause(clause)
+        if candidate is None:
             continue
-        key = _connection_key(connection)
+        key = (
+            candidate["subject"].lower(),
+            candidate["relation"].lower(),
+            candidate["predicate"].lower(),
+            source,
+        )
         if key in seen:
             continue
         seen.add(key)
-        connections.append(connection)
-        if connection_limit is not None and len(connections) >= connection_limit:
-            break
-    return connections
+        block_results.append(_connection_from_candidate(candidate, source))
+
+    _cache_set(cache_key, [_serialize_connection(connection) for connection in block_results])
+    return block_results
+
+
+def find_connections(blocks, query="", connection_limit=None):
+    limit = int(connection_limit or EXTRACTION_CLAUSE_LIMIT)
+    results = []
+    seen = set()
+    for block in _unique_blocks(blocks):
+        for connection in _connections_from_block(block, query=query):
+            subject_sp = connection.get("subject")
+            predicate_sp = connection.get("predicate")
+            key = (
+                subject_sp.asu_value().lower() if isinstance(subject_sp, ConnectionEndpoint) else "",
+                str(connection.get("connection", "")).lower(),
+                predicate_sp.asu_value().lower() if isinstance(predicate_sp, ConnectionEndpoint) else "",
+                connection.get("source", ""),
+                connection.get("text", ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(connection)
+            if len(results) >= limit:
+                return results
+    return results

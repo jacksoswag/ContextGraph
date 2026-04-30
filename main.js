@@ -49,10 +49,17 @@ let bondColorArray = new Float32Array(0);
 scene.add(bondSegments);
 bondSegments.visible = false;
 
-const AGENT_COLOR_LOW  = new THREE.Color(0x4e5f79);
-const AGENT_COLOR_MID  = new THREE.Color(0xbf5cff);
-const AGENT_COLOR_HIGH = new THREE.Color(0x79f2a3);
+const AGENT_COLOR_STOPS = [
+    { t: 0.00, color: new THREE.Color(0x8951d6) },
+    { t: 0.34, color: new THREE.Color(0xa66af0) },
+    { t: 0.58, color: new THREE.Color(0xaeb0ef) },
+    { t: 0.78, color: new THREE.Color(0x8bdac4) },
+    { t: 1.00, color: new THREE.Color(0x79f2a3) },
+];
+const AGENT_COLOR_HIGH = AGENT_COLOR_STOPS[AGENT_COLOR_STOPS.length - 1].color;
 const PHASE_IDLE = 0;
+const DEFAULT_TARGET_A_PLACEHOLDER = "e.g. cause";
+const DEFAULT_TARGET_B_PLACEHOLDER = "e.g. outcome";
 
 const phaseDebugCopy = {
     1: {
@@ -100,18 +107,20 @@ function quantile(values, q) {
 function connectivityScale(degree, softMax) {
     const capped = Math.min(Math.max(0, degree), Math.max(1, softMax));
     const norm = Math.log1p(capped) / Math.log1p(Math.max(1, softMax));
-    return clamp01(Math.pow(norm, 0.82));
+    return clamp01(Math.pow(norm, 0.78));
 }
 
 function getAgentColor(scale) {
     const t = clamp01(scale);
-    const color = new THREE.Color();
-    if (t < 0.55) {
-        color.copy(AGENT_COLOR_LOW).lerp(AGENT_COLOR_MID, t / 0.55);
-    } else {
-        color.copy(AGENT_COLOR_MID).lerp(AGENT_COLOR_HIGH, (t - 0.55) / 0.45);
+    for (let i = 1; i < AGENT_COLOR_STOPS.length; i += 1) {
+        const previous = AGENT_COLOR_STOPS[i - 1];
+        const next = AGENT_COLOR_STOPS[i];
+        if (t <= next.t) {
+            const span = Math.max(0.0001, next.t - previous.t);
+            return previous.color.clone().lerp(next.color, (t - previous.t) / span);
+        }
     }
-    return color;
+    return AGENT_COLOR_HIGH.clone();
 }
 
 function escapeHTML(value) {
@@ -233,12 +242,10 @@ function renderPhaseDebug(data) {
     `;
 }
 
-function promptLabel(targetA, targetB, tensePreference = "none") {
+function promptLabel(targetA, targetB) {
     const left = capitalizeFirst(targetA || "target A");
     const right = capitalizeFirst(targetB || "target B");
-    const tense = String(tensePreference || "none").trim().toLowerCase();
-    const tenseText = tense && tense !== "none" ? ` | ${capitalizeFirst(tense)} tense` : "";
-    return `${left} -> ${right}${tenseText}`;
+    return `${left} -> ${right}`;
 }
 
 function capitalizeFirst(value) {
@@ -278,7 +285,7 @@ function renderChat() {
             <div class="chat-row chat-row-user">
                 <div class="chat-bubble chat-bubble-user">
                     <div class="chat-label">Prompt</div>
-                    <div>${escapeHTML(promptLabel(turn.targetA, turn.targetB, turn.tensePreference))}</div>
+                    <div>${escapeHTML(promptLabel(turn.targetA, turn.targetB))}</div>
                 </div>
             </div>
         `);
@@ -323,12 +330,11 @@ function renderChat() {
     scrollChatToBottom();
 }
 
-function appendChatPrompt(targetA, targetB, tensePreference = "none") {
+function appendChatPrompt(targetA, targetB) {
     const turn = {
         id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         targetA,
         targetB,
-        tensePreference,
         response: "",
         phaseLogs: [],
     };
@@ -359,6 +365,7 @@ function finalizeActiveChat(report) {
     activeChatTurn.response = report || "No synthesis text was returned.";
     activeChatTurn = null;
     renderChat();
+    updateLaunchControls();
 }
 
 function showChatError(message) {
@@ -376,6 +383,7 @@ function showChatError(message) {
         });
     }
     renderChat();
+    updateLaunchControls();
 }
 
 function ensureBondCapacity(vertexCount) {
@@ -394,8 +402,52 @@ function ensureBondCapacity(vertexCount) {
 }
 
 function updateBonds(bonds) {
-    bondSegments.visible = false;
-    bondGeometry.setDrawRange(0, 0);
+    const drawable = [];
+    for (const bond of bonds || []) {
+        const source = agents.get(Number(bond.s));
+        const target = agents.get(Number(bond.d));
+        if (!source || !target || source === target) continue;
+        const utility = clamp01(Number(bond.utility) || 0);
+        drawable.push({ source, target, utility });
+    }
+
+    drawable.sort((a, b) => b.utility - a.utility);
+    const vertexCount = drawable.length * 2;
+    if (!vertexCount) {
+        bondSegments.visible = false;
+        bondGeometry.setDrawRange(0, 0);
+        return;
+    }
+
+    ensureBondCapacity(vertexCount);
+    const color = new THREE.Color();
+    for (let i = 0; i < drawable.length; i += 1) {
+        const bond = drawable[i];
+        const positionOffset = i * 6;
+        const sourcePos = bond.source.targetPosition;
+        const targetPos = bond.target.targetPosition;
+
+        bondPositionArray[positionOffset] = sourcePos.x;
+        bondPositionArray[positionOffset + 1] = sourcePos.y;
+        bondPositionArray[positionOffset + 2] = sourcePos.z;
+        bondPositionArray[positionOffset + 3] = targetPos.x;
+        bondPositionArray[positionOffset + 4] = targetPos.y;
+        bondPositionArray[positionOffset + 5] = targetPos.z;
+
+        color.copy(DEFAULT_BOND_COLOR).lerp(AGENT_COLOR_HIGH, bond.utility);
+        const colorOffset = i * 6;
+        bondColorArray[colorOffset] = color.r;
+        bondColorArray[colorOffset + 1] = color.g;
+        bondColorArray[colorOffset + 2] = color.b;
+        bondColorArray[colorOffset + 3] = color.r;
+        bondColorArray[colorOffset + 4] = color.g;
+        bondColorArray[colorOffset + 5] = color.b;
+    }
+
+    bondGeometry.attributes.position.needsUpdate = true;
+    bondGeometry.attributes.color.needsUpdate = true;
+    bondGeometry.setDrawRange(0, vertexCount);
+    bondSegments.visible = true;
 }
 
 // --- WebSocket Connection ---
@@ -493,7 +545,7 @@ function updateSwarm(data) {
     const bonds = data.connections || data.bonds || [];
     const activeIds = new Set();
     const degreeValues = data.agents.map(a => Number(a.degree ?? a.c ?? 0)).filter(v => Number.isFinite(v) && v > 0);
-    const softDegreeMax = Math.max(4, quantile(degreeValues, 0.92));
+    const softDegreeMax = Math.max(8, quantile(degreeValues, 0.88));
     
     // Update Agents
     const nodePositions = [];
@@ -554,33 +606,72 @@ let lastPhaseDebugSignature = "";
 let chatTurns = [];
 let activeChatTurn = null;
 let ignoredReportVersion = null;
+let latestEngineState = { phase: PHASE_IDLE, status: "System Online" };
 
 function launchBlockedUntilNewPrompt() {
     if (selectedResultId) return true;
     return Boolean(!activeChatTurn && chatTurns.some(turn => turn.response));
 }
 
+function engineIsReady(data = latestEngineState) {
+    return Number(data?.phase ?? PHASE_IDLE) === PHASE_IDLE || data?.status === "System Online";
+}
+
+function updateLaunchControls(data = latestEngineState) {
+    const targetAInput = document.getElementById('input-target-a');
+    const targetBInput = document.getElementById('input-target-b');
+    const launchBtn = document.getElementById('launch-btn');
+    if (!targetAInput || !targetBInput || !launchBtn) return;
+
+    const ready = engineIsReady(data);
+    const blocked = launchBlockedUntilNewPrompt();
+
+    if (!ready) {
+        const status = data?.status || "Engine busy";
+        targetAInput.placeholder = `[ ${status} ]`;
+        targetBInput.placeholder = `[ ${status} ]`;
+        launchBtn.innerText = "ENGINE BUSY...";
+    } else if (blocked) {
+        targetAInput.placeholder = "click New Prompt";
+        targetBInput.placeholder = "click New Prompt";
+        launchBtn.innerText = "NEW PROMPT REQUIRED";
+    } else {
+        targetAInput.placeholder = targetAInput.value ? "edit target A" : DEFAULT_TARGET_A_PLACEHOLDER;
+        targetBInput.placeholder = targetBInput.value ? "edit target B" : DEFAULT_TARGET_B_PLACEHOLDER;
+        launchBtn.innerText = "LAUNCH RESEARCH";
+    }
+
+    launchBtn.disabled = launchInFlight || !ready || blocked;
+}
+
+function resetForNewPrompt() {
+    selectedResultId = null;
+    chatTurns = [];
+    activeChatTurn = null;
+    latestLiveReport = "";
+    if (lastReportVersion >= 0) {
+        ignoredReportVersion = lastReportVersion;
+    }
+    lastPhaseDebugSignature = "";
+
+    const targetAInput = document.getElementById('input-target-a');
+    const targetBInput = document.getElementById('input-target-b');
+    if (targetAInput) targetAInput.value = "";
+    if (targetBInput) targetBInput.value = "";
+
+    renderHistoryList();
+    renderChat();
+    updateLaunchControls();
+    targetAInput?.focus();
+}
+
 function updateUI(data) {
+    latestEngineState = {
+        phase: Number(data?.phase ?? PHASE_IDLE),
+        status: data?.status || "",
+    };
     if (data.status) {
-        const targetAInput = document.getElementById('input-target-a');
-        const targetBInput = document.getElementById('input-target-b');
-        const launchBtn = document.getElementById('launch-btn');
-        const ready = data.phase === PHASE_IDLE || data.status === "System Online";
-        
-        if (!ready) {
-            targetAInput.placeholder = `[ ${data.status} ]`;
-            targetBInput.placeholder = `[ ${data.status} ]`;
-            launchBtn.innerText = "ENGINE BUSY...";
-        } else if (launchBlockedUntilNewPrompt()) {
-            targetAInput.placeholder = "click New Prompt";
-            targetBInput.placeholder = "click New Prompt";
-            launchBtn.innerText = "NEW PROMPT REQUIRED";
-        } else {
-            targetAInput.placeholder = targetAInput.value ? "edit target A" : "e.g. urban sprawl";
-            targetBInput.placeholder = "e.g. housing affordability";
-            launchBtn.innerText = "LAUNCH RESEARCH";
-        }
-        launchBtn.disabled = launchInFlight || launchBlockedUntilNewPrompt();
+        updateLaunchControls(data);
     }
 
     const phase = Number(data.phase ?? PHASE_IDLE);
@@ -588,7 +679,11 @@ function updateUI(data) {
     const reportChanged = data.report_version !== lastReportVersion;
 
     if (reportChanged) {
-        if (activeChatTurn && data.report && ignoredReportVersion && data.report_version === ignoredReportVersion) {
+        if (
+            data.report
+            && ignoredReportVersion !== null
+            && data.report_version === ignoredReportVersion
+        ) {
             lastReportVersion = data.report_version;
         } else {
             latestLiveReport = data.report || "";
@@ -652,6 +747,7 @@ function formatResultDate(value) {
 function setHistorySelection(resultId) {
     selectedResultId = resultId;
     renderHistoryList();
+    updateLaunchControls();
 }
 
 function renderHistoryList() {
@@ -664,19 +760,7 @@ function renderHistoryList() {
     newQueryBtn.className = `history-entry history-new-query${selectedResultId ? "" : " active"}`;
     newQueryBtn.type = "button";
     newQueryBtn.textContent = "New Prompt";
-    newQueryBtn.onclick = () => {
-        setHistorySelection(null);
-        chatTurns = [];
-        activeChatTurn = null;
-        latestLiveReport = "";
-        lastReportVersion = -1;
-        ignoredReportVersion = null;
-        document.getElementById('input-target-a').value = "";
-        document.getElementById('input-target-b').value = "";
-        lastPhaseDebugSignature = "";
-        renderChat();
-        document.getElementById('input-target-a').focus();
-    };
+    newQueryBtn.onclick = resetForNewPrompt;
     historyList.appendChild(newQueryBtn);
 
     if (!resultEntries.length) {
@@ -730,6 +814,7 @@ async function loadHistoricalResult(resultId) {
     }];
     activeChatTurn = null;
     renderChat();
+    updateLaunchControls();
 
     try {
         const response = await fetch(`${resultsApiUrl}/${encodeURIComponent(resultId)}`, { cache: "no-store" });
@@ -744,6 +829,7 @@ async function loadHistoricalResult(resultId) {
             phaseLogs: [],
         }];
         renderChat();
+        updateLaunchControls();
     } catch (error) {
         console.error("[WEB] Could not load saved result.", error);
         showChatError("Could not load that saved result.");
@@ -759,7 +845,6 @@ document.getElementById('launch-btn').onclick = async () => {
     }
     const targetA = document.getElementById('input-target-a').value.trim();
     const targetB = document.getElementById('input-target-b').value.trim();
-    const tensePreference = document.getElementById('input-tense-preference')?.value || "none";
     if (!targetA || !targetB) {
         showChatError("Enter both targets before launching research.");
         return;
@@ -772,7 +857,7 @@ document.getElementById('launch-btn').onclick = async () => {
     latestLiveReport = "";
     ignoredReportVersion = lastReportVersion;
     lastPhaseDebugSignature = "";
-    appendChatPrompt(targetA, targetB, tensePreference);
+    appendChatPrompt(targetA, targetB);
 
     try {
         const response = await fetch(`${apiHttpBase}/command`, {
@@ -781,7 +866,6 @@ document.getElementById('launch-btn').onclick = async () => {
             body: JSON.stringify({
                 target_a: targetA,
                 target_b: targetB,
-                tense_preference: tensePreference,
             })
         });
 
@@ -804,11 +888,12 @@ document.getElementById('launch-btn').onclick = async () => {
         return;
     } finally {
         launchInFlight = false;
-        launchBtn.disabled = launchBlockedUntilNewPrompt();
+        updateLaunchControls();
     }
 };
 
 renderChat();
+updateLaunchControls();
 loadResultsHistory();
 setInterval(loadResultsHistory, 15000);
 

@@ -1,18 +1,26 @@
 import json, os, re, requests
 from utils import display_source
+from d_noise_cleanup import is_usable_clause_text
 from constants import (
     DEFAULT_OLLAMA_CONNECT_TIMEOUT,
     DEFAULT_OLLAMA_READ_TIMEOUT,
     OLLAMA_GENERATE_URL,
+    SYNTHESIS_ARGUMENT_LIMIT,
     SYNTHESIS_MAX_CHAIN_CLAUSES,
     SYNTHESIS_MODEL,
     SYNTHESIS_TARGET_MATCH_THRESHOLD,
 )
+from target_text import target_tokens
 
 SPECIFIC_CITATION_RE = re.compile(r"(\d|%|\b[A-Z]{2,}\b)")
+CONCRETE_DETAIL_RE = re.compile(
+    r"(\$|%|\b\d[\d,./:-]*\b|\b(?:million|billion|trillion|percent|dollars?|median|rent|price|cost|income)\b)",
+    re.I,
+)
 SOURCE_LINE_RE = re.compile(r"^\s*\[\d+\]\s*:?.*$")
 SOURCE_REF_RE = re.compile(r"\[(\d+)\]")
 TEXT_TOKEN_RE = re.compile(r"[a-z0-9]+")
+PAYLOAD_DIVERSITY_THRESHOLD = 0.72
 
 class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3B
     def __init__(self, ollama_url=OLLAMA_GENERATE_URL, model=SYNTHESIS_MODEL):
@@ -33,27 +41,44 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
         text = " ".join(str(clause or "").strip().split())
         return f"{text.rstrip('.')}." if text else ""
 
-    def _temporal_context_text(self, temporal) -> str:
-        if not isinstance(temporal, dict):
-            return ""
-        text = " ".join(str(temporal.get("text") or "").strip().split())
-        if text:
-            return text.rstrip(".") + "."
-        original = str(temporal.get("original_tense") or "").strip()
-        current = str(temporal.get("current_tense") or "").strip()
-        confidence = str(temporal.get("temporal_confidence") or "").strip()
-        if not any((original, current, confidence)):
-            return ""
-        return (
-            f"Original source-time tense: {original or 'unknown'}; "
-            f"current-relative tense: {current or 'unknown'}; "
-            f"temporal confidence: {confidence or 'unknown'}."
-        )
-
     def _step_clause(self, step) -> str:
         if not isinstance(step, dict):
             return ""
         return self._clause_text(step.get("evidence_text", ""))
+
+    def _source_is_citable(self, source) -> bool:
+        raw = " ".join(str(source or "").strip().split())
+        display = display_source(raw)
+        return bool(
+            display
+            and display != "unknown"
+            and ("|" in raw or "://" in display or "/" in display or "." in display)
+        )
+
+    def _record_key(self, record, include_role=True):
+        text = self._clause_text((record or {}).get("text", "")).lower()
+        text = " ".join(TEXT_TOKEN_RE.findall(text))
+        source = display_source((record or {}).get("source", "")).rstrip("/").lower()
+        if include_role:
+            return (str((record or {}).get("role") or "path").strip() or "path", text, source)
+        return (text, source)
+
+    def _dedupe_records(self, records):
+        deduped = []
+        seen = set()
+        for record in list(records or []):
+            key = self._record_key(record)
+            if not key[1] or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(record)
+        return deduped
+
+    def _record_has_concrete_detail(self, record) -> bool:
+        return bool(CONCRETE_DETAIL_RE.search(str((record or {}).get("text") or "")))
+
+    def _record_concrete_count(self, record) -> int:
+        return len(CONCRETE_DETAIL_RE.findall(str((record or {}).get("text") or "")))
 
     def _chain_records(self, chain):
         records = []
@@ -68,7 +93,6 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
                         "text": clause,
                         "source": str(step.get("source") or "").strip(),
                         "role": "path",
-                        "temporal": dict(step.get("temporal") or {}),
                     }
                 )
             for detail in list(step.get("specific_details", []) or []):
@@ -82,17 +106,9 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
                         "text": text,
                         "source": str(detail.get("source") or "").strip(),
                         "role": "specific_context",
-                        "temporal": dict(detail.get("temporal") or {}),
                     }
                 )
         return records
-
-    def _format_argument_notes(self, chain, source_map=None) -> str:
-        del source_map
-        if not chain or not isinstance(chain[0], dict):
-            return self._format_argument(chain)
-
-        return self._record_chain_text(self._chain_records(chain))
 
     def _format_argument(self, chain, source_map=None) -> str:
         del source_map
@@ -131,17 +147,16 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
             sentences.append(text)
         return " ".join(sentences)
 
-    def _record_chain_text(self, records, source_map=None) -> str:
+    def _record_chain_text(self, records, source_map=None, require_citation=False) -> str:
         sentences = []
         for record in list(records or []):
             text = self._clause_text((record or {}).get("text", ""))
             if not text:
                 continue
             source = str((record or {}).get("source") or "").strip()
-            temporal_text = self._temporal_context_text((record or {}).get("temporal"))
-            if temporal_text:
-                text = f"{text.rstrip('.')} (Temporal context: {temporal_text.rstrip('.')})."
             source_refs = self._source_refs([source], source_map or {})
+            if require_citation and not source_refs:
+                continue
             if source_refs:
                 text = f"{text.rstrip('.')} {source_refs}."
             sentences.append(text)
@@ -149,44 +164,173 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
 
     def _payload_records(self, payload):
         records = []
+        fallback_sources = [
+            str(source or "").strip()
+            for source in list((payload or {}).get("sources", []) or [])
+            if self._source_is_citable(source)
+        ]
+        fallback_source = fallback_sources[0] if len(fallback_sources) == 1 else ""
+
         for record in list((payload or {}).get("clause_records", []) or []):
             if not isinstance(record, dict):
                 continue
             text = self._clause_text(record.get("text", ""))
             if not text:
                 continue
+            if not is_usable_clause_text(text):
+                continue
+            source = str(record.get("source") or "").strip() or fallback_source
             records.append(
                 {
                     "text": text,
-                    "source": str(record.get("source") or "").strip(),
+                    "source": source,
                     "role": str(record.get("role") or "path").strip() or "path",
-                    "temporal": dict(record.get("temporal") or {}),
+                    "specificity": list(record.get("specificity", []) or []),
                 }
             )
 
         if records:
-            return records
+            return self._dedupe_records(records)
 
-        sources = [
-            str(source or "").strip()
-            for source in list((payload or {}).get("sources", []) or [])
-            if str(source or "").strip() and str(source or "").strip() != "unknown"
-        ]
-        fallback_source = sources[0] if len(sources) == 1 else ""
         for clause in list((payload or {}).get("path_clauses", []) or []):
             text = self._clause_text(clause)
             if text:
-                records.append({"text": text, "source": fallback_source, "role": "path", "temporal": {}})
+                records.append({"text": text, "source": fallback_source, "role": "path"})
         for clause in list((payload or {}).get("supporting_clauses", []) or []):
             text = self._clause_text(clause)
             if text:
-                records.append({"text": text, "source": fallback_source, "role": "specific_context", "temporal": {}})
+                records.append({"text": text, "source": fallback_source, "role": "specific_context"})
+        return self._dedupe_records(records)
+
+    def _payload_role_records(self, payload, role, require_citation=False):
+        records = [
+            record
+            for record in self._payload_records(payload)
+            if (record or {}).get("role") == role
+        ]
+        if require_citation:
+            records = [
+                record for record in records
+                if self._source_is_citable((record or {}).get("source"))
+            ]
         return records
+
+    def _payload_source_count(self, payload) -> int:
+        sources = {
+            display_source((record or {}).get("source")).rstrip("/").lower()
+            for record in self._payload_records(payload)
+            if self._source_is_citable((record or {}).get("source"))
+        }
+        return len([source for source in sources if source and source != "unknown"])
+
+    def _payload_concrete_score(self, payload) -> int:
+        return sum(
+            1
+            for record in self._payload_records(payload)
+            if self._record_has_concrete_detail(record)
+            and self._source_is_citable((record or {}).get("source"))
+        )
+
+    def _payload_path_concrete_score(self, payload) -> int:
+        return sum(
+            1
+            for record in self._payload_role_records(payload, "path", require_citation=True)
+            if self._record_has_concrete_detail(record)
+        )
+
+    def _payload_chain_char_count(self, payload) -> int:
+        records = self._payload_role_records(payload, "path", require_citation=True)
+        if not records:
+            records = self._payload_role_records(payload, "path")
+        path_text = " ".join(
+            str((record or {}).get("text") or "").strip()
+            for record in records
+        ).strip()
+        if not path_text:
+            path_text = " ".join(
+                str(clause or "").strip()
+                for clause in list((payload or {}).get("path_clauses", []) or [])
+            ).strip()
+        return len(path_text)
+
+    def _payload_rank_key(self, payload):
+        return (
+            self._payload_path_concrete_score(payload),
+            self._payload_concrete_score(payload),
+            self._payload_source_count(payload),
+            float((payload or {}).get("support_score", 0.0) or 0.0),
+            self._payload_chain_char_count(payload),
+        )
+
+    def _payload_mechanism_tokens(self, payload, target_a="", target_b=""):
+        target_token_set = set(target_tokens(f"{target_a} {target_b}", min_length=3))
+        path_text = " ".join(
+            str((record or {}).get("text") or "")
+            for record in self._payload_role_records(payload, "path")
+        )
+        tokens = set(target_tokens(path_text, min_length=3))
+        return {
+            token
+            for token in tokens
+            if token not in target_token_set and not token.isdigit()
+        }
+
+    def _token_similarity(self, left, right):
+        left = set(left or [])
+        right = set(right or [])
+        if not left or not right:
+            return 0.0
+        return len(left & right) / len(left | right)
+
+    def _select_diverse_payloads(self, payloads, target_a="", target_b="", limit=None):
+        limit = max(1, int(limit or SYNTHESIS_ARGUMENT_LIMIT))
+        ranked = sorted(payloads, key=self._payload_rank_key, reverse=True)
+        selected = []
+        selected_mechanisms = []
+        seen = set()
+
+        def signature(payload):
+            text = " ".join(
+                str((record or {}).get("text") or "").strip().lower()
+                for record in self._payload_role_records(payload, "path", require_citation=True)
+            )
+            route = str((payload or {}).get("route", "") or "").strip().lower()
+            endpoint = str((payload or {}).get("endpoint", "") or "").strip().lower()
+            return route, endpoint, text
+
+        def try_append(payload, enforce_diversity):
+            key = signature(payload)
+            if key in seen:
+                return False
+            mechanism_tokens = self._payload_mechanism_tokens(payload, target_a, target_b)
+            if enforce_diversity and selected_mechanisms and mechanism_tokens:
+                similarity = max(
+                    self._token_similarity(mechanism_tokens, selected_tokens)
+                    for selected_tokens in selected_mechanisms
+                )
+                if similarity >= PAYLOAD_DIVERSITY_THRESHOLD:
+                    return False
+            seen.add(key)
+            selected.append(payload)
+            selected_mechanisms.append(mechanism_tokens)
+            return True
+
+        for payload in ranked:
+            try_append(payload, enforce_diversity=True)
+            if len(selected) >= limit:
+                return selected
+        for payload in ranked:
+            try_append(payload, enforce_diversity=False)
+            if len(selected) >= limit:
+                return selected
+        return selected
 
     def _build_source_map(self, payloads) -> dict:
         source_map = {}
         for payload in payloads:
             for record in self._payload_records(payload):
+                if not self._source_is_citable((record or {}).get("source")):
+                    continue
                 source = display_source((record or {}).get("source"))
                 if source and source != "unknown" and source not in source_map:
                     source_map[source] = len(source_map) + 1
@@ -224,6 +368,17 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
             if next_is_blank and 2 <= title_word_count <= 22:
                 lines[index] = f"## {title}"
             break
+        return "\n".join(lines).strip()
+
+    def _strip_argument_labels(self, text):
+        lines = []
+        for line in str(text or "").splitlines():
+            clean = line.strip()
+            heading = re.match(r"^(#{1,4})\s+Argument\s+\d+\s*:\s*(.+)$", clean, flags=re.IGNORECASE)
+            if heading:
+                lines.append(f"{heading.group(1)} {heading.group(2).strip()}")
+                continue
+            lines.append(re.sub(r"\bArgument\s+\d+\s*:\s*", "", line, flags=re.IGNORECASE))
         return "\n".join(lines).strip()
 
     def _sentence_has_source_ref(self, sentence):
@@ -347,41 +502,90 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
         compact_text = re.sub(r"[ \t]{2,}", " ", compact_text)
         return compact_text, compact_source_map
 
+    def _record_tokens(self, record):
+        return {
+            token
+            for token in TEXT_TOKEN_RE.findall(str((record or {}).get("text") or "").lower())
+            if len(token) > 2
+        }
+
+    def _context_relevance_key(self, record, path_token_set, target_token_set):
+        record_tokens = self._record_tokens(record)
+        path_overlap = len(record_tokens & set(path_token_set or []))
+        target_overlap = len(record_tokens & set(target_token_set or []))
+        specificity = len(list((record or {}).get("specificity", []) or []))
+        return (
+            path_overlap > 0,
+            path_overlap,
+            target_overlap,
+            self._record_has_concrete_detail(record),
+            self._record_concrete_count(record),
+            specificity,
+            -len(record_tokens),
+        )
+
     def synthesize_relationship_report(self, target_a: str, target_b: str, payloads: list[dict]) -> str:
         payloads = [dict(item or {}) for item in list(payloads or []) if isinstance(item, dict)]
         payloads = [
             payload
             for payload in payloads
-            if len(list(payload.get("path_clauses", []) or [])) >= 2
-            and float(payload.get("match_target_a", 0.0) or 0.0) >= SYNTHESIS_TARGET_MATCH_THRESHOLD
-            and float(payload.get("match_target_b", 0.0) or 0.0) >= SYNTHESIS_TARGET_MATCH_THRESHOLD
+            if self._payload_role_records(payload, "path", require_citation=True)
+            and (
+                payload.get("endpoint_reached")
+                or (
+                    len(self._payload_role_records(payload, "path", require_citation=True)) >= 2
+                    and float(payload.get("match_target_a", 0.0) or 0.0) >= SYNTHESIS_TARGET_MATCH_THRESHOLD
+                    and float(payload.get("match_target_b", 0.0) or 0.0) >= SYNTHESIS_TARGET_MATCH_THRESHOLD
+                )
+            )
         ]
         if not payloads:
             return f"No successful relationship chains were found between {target_a or 'target A'} and {target_b or 'target B'}."
 
+        payloads = self._select_diverse_payloads(
+            payloads,
+            target_a=target_a,
+            target_b=target_b,
+            limit=SYNTHESIS_ARGUMENT_LIMIT,
+        )
         source_map = self._build_source_map(payloads)
 
         note_blocks = []
         evidence_records = []
+        target_token_set = set(target_tokens(f"{target_a} {target_b}", min_length=3))
         for payload in payloads:
             records = self._payload_records(payload)
             evidence_records.extend(records)
-            path_records = [
-                record for record in records if record.get("role") == "path"
-            ][:SYNTHESIS_MAX_CHAIN_CLAUSES]
-            context_records = [
-                record for record in records if record.get("role") == "specific_context"
-            ][:SYNTHESIS_MAX_CHAIN_CLAUSES * 3]
-            path_text = self._record_chain_text(path_records, source_map=source_map)
-            context_text = self._record_chain_text(context_records, source_map=source_map)
+            path_records = self._payload_role_records(
+                payload,
+                "path",
+                require_citation=True,
+            )[:SYNTHESIS_MAX_CHAIN_CLAUSES]
+            path_keys = {self._record_key(record, include_role=False) for record in path_records}
+            context_pool = [
+                record for record in self._payload_role_records(payload, "specific_context", require_citation=True)
+                if self._record_key(record, include_role=False) not in path_keys
+            ]
+            path_token_set = set()
+            for record in path_records:
+                path_token_set.update(self._record_tokens(record))
+            context_records = sorted(
+                context_pool,
+                key=lambda record: self._context_relevance_key(record, path_token_set, target_token_set),
+                reverse=True,
+            )[:SYNTHESIS_MAX_CHAIN_CLAUSES * 3]
+            path_text = self._record_chain_text(path_records, source_map=source_map, require_citation=True)
+            context_text = self._record_chain_text(context_records, source_map=source_map, require_citation=True)
             if not path_text:
                 continue
-            block_parts = [f"Relationship evidence: {path_text}"]
+            block_parts = [f"Mechanism evidence: {path_text}"]
             if context_text:
-                block_parts.append(f"Concrete details: {context_text}")
+                block_parts.append(f"Relevant concrete details: {context_text}")
             note_blocks.append("\n".join(block_parts))
 
         digest = "\n\n".join(note_blocks)
+        if not digest:
+            return f"No citable relationship chains were found between {target_a or 'target A'} and {target_b or 'target B'}."
         source_lines = "\n".join(
             f"[{idx}]: {source}"
             for source, idx in sorted(source_map.items(), key=lambda item: item[1])
@@ -405,22 +609,30 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
             - Do not put source markers on titles or headings.
             - Write directly about Target A, Target B, and the substantive relationship between them.
             - Do not describe your method, the input format, or the fact that evidence was provided.
-            - Treat relationship evidence as the core sequence and concrete details as supporting facts about entities in that sequence.
-            - Each paragraph should be one substantive argument grounded in the provided wording.
+            - Use all evidence blocks together; combine them only when they add distinct support.
+            - Treat mechanism evidence as the core sequence and relevant concrete details as supporting facts about entities in that sequence.
+            - Give more space to mechanisms, concrete figures, dates, named places, and time-bounded comparisons than to definitions.
+            - Each paragraph should make one substantive claim grounded in the provided wording.
             - Use only the provided wording to draw conclusions.
             - Report on how Target A and Target B are connected only when the provided wording actually supports that link.
+            - Preserve polarity: distinguish evidence that says Target A improves, lowers, increases, worsens, reduces, or complicates Target B instead of blending opposite directions into one claim.
+            - If the evidence points in mixed directions, say the relationship is mixed and explain each direction separately.
+            - Do not turn a narrower finding about one period, place, metric, or group into a general rule.
+            - When comparing time periods, say when the periods or metrics are not the same and avoid treating them as directly comparable unless the evidence says they are.
             - If evidence only shows general expertise, revenue, scale, authority, or global presence, do not infer specific involvement in Target B.
             - Do not use examples from unrelated places, programs, or organizations as support for Target B unless the evidence explicitly links them to Target B.
             - If evidence separately describes Target A and Target B but does not bridge them, say the relationship is insufficiently supported.
-            - Match the title and conclusion to the actual strength of the evidence: direct, indirect, weak, or insufficient.
+            - Match the title and conclusion to the actual strength of the evidence: direct, indirect, mixed, weak, or insufficient.
             - Cite each source-grounded sentence with the marker already attached to the evidence it uses, like [1] or [1] [2].
             - Do not reuse a source marker unless that sentence relies on that source's evidence.
-            - Use Temporal context to distinguish source-time wording from current-time wording.
-            - If Temporal context says an explicit event date resolves as past/present/future today, write the claim in that current-relative tense even if the original clause says "will" or "is".
-            - If Temporal context says a present/future clause is stale, unknown, or projection-only, phrase it as source-time description or projection, not as a confirmed current fact.
             - Preserve concrete figures, dates, proper nouns, and source-linked claims exactly as written in the clauses.
+            - Prefer concrete figures, dates, monetary amounts, percentages, named places, and named policies when the evidence provides them.
+            - If the evidence does not provide numbers or hard facts for an important part of the relationship, say that the provided chain lacks those specifics instead of inventing them.
+            - Avoid headings or phrasing like "Argument 1", "Argument 2", "evidence block", "chain", or "record".
+            - Include at most one concise definition of Target A or Target B unless multiple definitions materially change the relationship.
             - Write in concise formal prose.
-            - If the chains are weak, indirect, or insufficient, say that plainly instead of forcing a strong conclusion.
+            - If the evidence is mixed, prefer a measured conclusion such as: the extracted evidence supports a mixed relationship, where one mechanism can move Target B in one direction while broader conditions can move it in another.
+            - If the chains are weak, indirect, or insufficient, say that plainly without using a blunt boilerplate conclusion when a more specific limitation is available.
             - Do not invent sources, mechanisms, causal claims, or agreement levels that are not in the records.
             - Do not add notes, implementation comments, or commentary about the report itself.
             - End with a short conclusion about the strongest supported link between Target A and Target B, or state that support is insufficient.
@@ -463,6 +675,7 @@ class KnowledgeSynthesizer: # Synthesizes arguments into a report using Ollama 3
                 return "Error: No response from model."
             final_text = self._strip_existing_source_list(final_text)
             final_text = self._normalize_report_heading(final_text)
+            final_text = self._strip_argument_labels(final_text)
             final_text = self._ensure_sentence_citations(final_text, source_map, evidence_records)
             final_text, used_source_map = self._compact_source_map(final_text, source_map)
             return self._append_source_list(final_text, used_source_map)

@@ -21,16 +21,11 @@ def parse_command_payload(cmd_raw):
             cmd_id = str(payload.get("id", "")).strip() or cmd_raw
             target_a = str(payload.get("target_a", "")).strip()
             target_b = str(payload.get("target_b", "")).strip()
-            tense_preference = normalize_tense_preference(payload.get("tense_preference", "none"))
-            return cmd_id, target_a, target_b, tense_preference
+            return cmd_id, target_a, target_b
     except json.JSONDecodeError: pass
     if "|" in cmd_raw: target_a, target_b = cmd_raw.split("|", 1)
     else: target_a, target_b = cmd_raw, ""
-    return " ".join(cmd_raw.strip().split()), target_a.strip(), target_b.strip(), "none"
-
-def normalize_tense_preference(value):
-    clean = str(value or "").strip().lower()
-    return clean if clean in {"past", "future"} else "none"
+    return " ".join(cmd_raw.strip().split()), target_a.strip(), target_b.strip()
 
 def flush_conn_log(self): # Flushes the connection log to a file
     if not self._conn_log: return
@@ -118,12 +113,15 @@ def _specific_key(value): # get specific key
 def merge_specifics(existing, incoming): # merge specifics
     merged = []
     seen = set()
-    for bucket in (existing or [], incoming or []):
-        key = _specific_key(bucket)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        merged.append(bucket)
+    for values in (existing, incoming):
+        if isinstance(values, dict) or isinstance(values, str):
+            values = [values]
+        for item in list(values or []):
+            key = _specific_key(item)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
     return merged
 
 def format_specifics(values): # format specifics for display
@@ -137,16 +135,3 @@ def format_specifics(values): # format specifics for display
         seen.add(key)
         parts.append(text)
     return "; ".join(parts)
-
-def apply_quantifier(text, quantifier_id): # apply quantifier to text
-    from d_word_info_map import literal_from_index
-
-    phrase = _clean_text(text)
-    quantifier = _clean_text(literal_from_index(int(quantifier_id))) if quantifier_id not in (None, "", -1) else ""
-    if not phrase or not quantifier:
-        return phrase
-    lower_phrase = phrase.lower()
-    lower_quantifier = quantifier.lower()
-    if lower_phrase == lower_quantifier or lower_phrase.startswith(f"{lower_quantifier} "):
-        return phrase
-    return f"{quantifier} {phrase}".strip()

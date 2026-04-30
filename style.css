@@ -549,8 +549,7 @@ body {
     letter-spacing: 1px;
 }
 
-.input-group input,
-.input-group select {
+.input-group input {
     width: 100%;
     min-width: 0;
     background: var(--bg-color);
@@ -562,17 +561,7 @@ body {
     outline: none;
 }
 
-.input-group select {
-    min-width: 110px;
-    cursor: pointer;
-}
-
-.tense-group {
-    flex: 0 1 150px;
-}
-
-.input-group input:focus,
-.input-group select:focus {
+.input-group input:focus {
     border-color: var(--accent-color);
 }
 
@@ -592,10 +581,6 @@ body {
 @media (max-width: 1500px) {
     .bottom-controls {
         gap: 12px;
-    }
-
-    .tense-group {
-        flex-basis: 130px;
     }
 
     #launch-btn {

@@ -1,10 +1,7 @@
 import numpy as np  # type: ignore
-from typing import TYPE_CHECKING, List, Optional
+from typing import List, Optional
 from constants import AGENT_SEMANTIC_SEED_SCALE
 from d_word_info_map import concept_vector_from_text, str_to_vector
-
-if TYPE_CHECKING:
-    from o_connection import Connector
 
 class Info_Agent:
     _projection_matrices = {} # maps info vector into 3D space (normalized to 0-1)

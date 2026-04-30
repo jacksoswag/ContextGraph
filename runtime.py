@@ -1,7 +1,17 @@
 import time
 from queue import Empty
 import d_query_expander
-from constants import PHASE_IDLE, PHASE_RESEARCH, PHASE_SYNTHESIS, THINK_THREADS
+from constants import (
+    PHASE_IDLE,
+    PHASE_RESEARCH,
+    PHASE_SYNTHESIS,
+    SCRAPE_DEFAULT_LIMIT,
+    SCRAPE_REFINEMENT_ENABLED,
+    SCRAPE_REFINEMENT_LIMIT,
+    SCRAPE_REFINEMENT_OFFSET,
+    THINK_THREADS,
+    THOUGHT_AGENTS_PER_WORKER,
+)
 from graph import Brain
 from utils import parse_command_payload
 
@@ -19,9 +29,16 @@ def _set_counters(sync_counter, ingest_counter, sync_value, ingest_value=None): 
 def _decrement_counter(counter): # Atomically decrements a shared counter
     with counter.get_lock(): counter.value = max(0, counter.value - 1)
 
-def _queue_scrape_queries(scrape_queue, queries): # Puts queries into the scrape queue
+def _queue_scrape_queries(scrape_queue, queries, research_pass="primary", limit=SCRAPE_DEFAULT_LIMIT, offset=0): # Puts queries into the scrape queue
     for query in queries: 
-        scrape_queue.put({"query": query})
+        scrape_queue.put(
+            {
+                "query": query,
+                "research_pass": research_pass,
+                "limit": int(limit),
+                "offset": int(offset),
+            }
+        )
 
 def run_brain(scrape_queue, asu_queue, stop_event, shm_names, sync_counter, ingest_counter):
     global _ACTIVE_BRAIN
@@ -32,7 +49,7 @@ def run_brain(scrape_queue, asu_queue, stop_event, shm_names, sync_counter, inge
     while not stop_event.is_set():
         cmd_raw = bytes(brain.shm_cmd.buf).split(b"\x00")[0].decode("utf-8").strip()
         if cmd_raw:
-            cmd_id, target_a, target_b, tense_preference = parse_command_payload(cmd_raw)
+            cmd_id, target_a, target_b = parse_command_payload(cmd_raw)
             current_status = brain.shm_status.buf[0]
 
             # If a new command is received and the brain is idle, process it
@@ -41,7 +58,6 @@ def run_brain(scrape_queue, asu_queue, stop_event, shm_names, sync_counter, inge
                 brain.current_command_id = cmd_id
                 brain.current_target_a = target_a.strip()
                 brain.current_target_b = target_b.strip()
-                brain.current_tense_preference = tense_preference
                 if brain.current_target_a and brain.current_target_b: # If both targets exist, combine them
                     brain.current_target = f"{brain.current_target_a} and {brain.current_target_b}"
                 else:
@@ -53,7 +69,6 @@ def run_brain(scrape_queue, asu_queue, stop_event, shm_names, sync_counter, inge
 
                 print(f"[BRAIN] New command: '{cmd_raw}'")
                 print(f"[BRAIN] Target A: '{brain.current_target_a}' | Target B: '{brain.current_target_b}'")
-                print(f"[BRAIN] Tense preference: '{brain.current_tense_preference}'")
                 _set_counter(sync_counter, 1)
 
                 try:
@@ -94,8 +109,16 @@ def run_brain(scrape_queue, asu_queue, stop_event, shm_names, sync_counter, inge
             except Empty: break
             query, connections = brain.record_research_result(task)
             if task.get("error"): print(f"[SCRAPE] Query failed for '{query}': {task['error']}")
-            print(f"[SCRAPE] {len(connections)} connections for query: '{query}'")
-            brain.ingest_research_connections(query, connections)
+            research_pass = task.get("research_pass", "primary")
+            print(
+                f"[SCRAPE:{research_pass}] {len(connections)} connections from "
+                f"{len(task.get('blocks', []) or [])} blocks for query: '{query}'"
+            )
+            brain.ingest_research_connections(
+                query,
+                connections,
+                restrict_to_existing=research_pass == "refine_existing",
+            )
             _decrement_counter(ingest_counter)
 
         current_status = brain.shm_status.buf[0]
@@ -109,6 +132,14 @@ def launch_thought_workers(stop_event, worker_count=THINK_THREADS):
     if brain is None: return False
     brain.start_thought_workers(stop_event, worker_count=worker_count)
     return True
+
+def prepare_active_subgraph():
+    brain = _ACTIVE_BRAIN
+    if brain is None:
+        return None
+    return brain.prepare_active_subgraph(
+        total_thoughts=THINK_THREADS * THOUGHT_AGENTS_PER_WORKER,
+    )
 
 def thought_workers_finished():
     brain = _ACTIVE_BRAIN
@@ -129,3 +160,28 @@ def stop_thought_workers():
     brain = _ACTIVE_BRAIN
     if brain is None: return
     brain.stop_thought_workers()
+
+
+def queue_refinement_scrapes(scrape_queue, sync_counter, ingest_counter):
+    brain = _ACTIVE_BRAIN
+    if brain is None or not SCRAPE_REFINEMENT_ENABLED:
+        return False
+    if getattr(brain, "refinement_pass_queued", False):
+        return False
+    queries = list(getattr(brain, "current_subqueries", []) or [])
+    if not queries:
+        return False
+    brain.refinement_pass_queued = True
+    print(
+        "[RESEARCH] First scrape pass complete. Launching refinement pass "
+        f"for {len(queries)} queries at offset {SCRAPE_REFINEMENT_OFFSET}."
+    )
+    _set_counters(sync_counter, ingest_counter, len(queries))
+    _queue_scrape_queries(
+        scrape_queue,
+        queries,
+        research_pass="refine_existing",
+        limit=SCRAPE_REFINEMENT_LIMIT,
+        offset=SCRAPE_REFINEMENT_OFFSET,
+    )
+    return True

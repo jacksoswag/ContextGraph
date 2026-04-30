@@ -1,60 +1,31 @@
-import random
 import re
-
-import numpy as np  # type: ignore
 
 from constants import (
     ARGUMENT_SOURCE_DIVERSITY_MIN_MULTIPLIER,
     ARGUMENT_SOURCE_DIVERSITY_TARGET,
-    LOW_SCORE_THRESHOLD,
-    MAX_ADJACENT_SAMPLES,
     MAX_CONTEXT_SAMPLES,
-    MAX_THOUGHT_HOPS,
-    MIN_SUCCESS_STEPS,
-    PATH_TARGET_MATCH_THRESHOLD,
-    SPECIFIC_DETAIL_REWARD_RATE,
-    SPECIFIC_DETAIL_REWARD_SATURATION,
-    SPATIAL_PROGRESS_REWARD_RATE,
     STARTING_SCORE,
-    STOPWORD_TOKENS,
-    SUCCESS_SIMILARITY_THRESHOLD,
-    THOUGHT_CITED_FACT_WEIGHT,
-    THOUGHT_CITED_FACT_WEIGHT_CAP,
-    THOUGHT_DESTINATION_CITED_FACT_WEIGHT,
-    THOUGHT_SEMANTIC_CHECK_INTERVAL,
-    THOUGHT_MIN_STEP_SCORE_MULTIPLIER,
-    THOUGHT_TENSE_OPPOSITION_PENALTY,
-    THOUGHT_TENSE_PREFERENCE_WEIGHT,
-    THOUGHT_UTILITY_PENALTY_RATE,
-    UTILITY_FLOOR,
 )
+from d_noise_cleanup import is_usable_clause_text
 from d_word_info_map import existing_concept_index, literal_from_index, text_similarity
 from o_connection import ConnectionEndpoint
 from o_info_agent import ASU_Agent
+from target_text import distinctive_target_tokens, target_tokens
 from utils import display_source
-
-TARGET_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 PROPER_NOUN_RE = re.compile(r"\b[A-Z][a-z]+\b")
 NUMBER_RE = re.compile(r"\d")
-ACRONYM_RE = re.compile(r"\b[A-Z]{2,}\b")
 SPECIFIC_DETAIL_RE = re.compile(r"\d[\d,./:-]*%?|%")
 
 _MATCH_SCORE_CACHE = {}
 _LEXICAL_MATCH_CACHE = {}
-_CONNECTOR_FACT_SCORE_CACHE = {}
-_AGENT_FACT_SCORE_CACHE = {}
 _SPECIFIC_CONTEXT_CACHE = {}
-_CANDIDATE_HOP_CACHE = {}
 
 
 def clear_thought_caches():
     _MATCH_SCORE_CACHE.clear()
     _LEXICAL_MATCH_CACHE.clear()
-    _CONNECTOR_FACT_SCORE_CACHE.clear()
-    _AGENT_FACT_SCORE_CACHE.clear()
     _SPECIFIC_CONTEXT_CACHE.clear()
-    _CANDIDATE_HOP_CACHE.clear()
 
 
 def _optional_int(value, default=-1):
@@ -81,7 +52,6 @@ class Thought:
         target_b: str = "",
         success_queries=None,
         goal_agents=None,
-        tense_preference="none",
     ):
         self.current_asu = current_asu
         self.seed_query = _clean_text(seed_query)
@@ -93,7 +63,6 @@ class Thought:
             if _clean_text(query)
         ]
         self.goal_agents = list(goal_agents or [])
-        self.tense_preference = self._normalize_tense_preference(tense_preference)
         self.reset(current_asu)
 
     def reset(self, start_asu: ASU_Agent | None = None):
@@ -112,32 +81,6 @@ class Thought:
         self._connector_cited_score_cache = {}
         self.history = [{"node": self.current_asu.ASU, "seed_query": self.seed_query}]
 
-    def _hop_parts(self, hop):
-        if isinstance(hop, tuple) and len(hop) == 3:
-            return hop
-        conn = hop
-        if conn is None:
-            return None, None, False
-        source_agent = conn.source_agent
-        target = conn.target
-        if source_agent is not None and source_agent.index == self.current_asu.index:
-            return conn, target, False
-        if target is not None and target.index == self.current_asu.index:
-            return conn, source_agent, True
-        return conn, target, False
-
-    @staticmethod
-    def _normalize_tense_preference(value):
-        clean = _clean_text(value).lower()
-        return clean if clean in {"past", "future"} else "none"
-
-    def _preferred_tense_score(self):
-        if self.tense_preference == "past":
-            return -1.0
-        if self.tense_preference == "future":
-            return 1.0
-        return 0.0
-
     def _candidate_hop(self, conn):
         source_agent = conn.source_agent
         target = conn.target
@@ -149,53 +92,6 @@ class Thought:
             return (conn, source_agent, True)
         return None
 
-    def _candidate_hops_for_current(self):
-        connections = list(getattr(self.current_asu, "connectors", []) or [])
-        if not connections:
-            return [], []
-
-        cache_key = (getattr(self.current_asu, "index", -1), len(connections))
-        cached = _CANDIDATE_HOP_CACHE.get(cache_key)
-        if cached is not None:
-            return cached
-
-        current_pos = self.current_asu.pos
-        hops = []
-        distances = []
-        for conn in connections:
-            hop = self._candidate_hop(conn)
-            if hop is None:
-                continue
-            _conn, next_agent, _reversed_hop = hop
-            if next_agent is None or next_agent.index == self.current_asu.index:
-                continue
-            hops.append(hop)
-            distances.append(self.distance_value(next_agent, current_pos))
-
-        cached = (hops, distances)
-        _CANDIDATE_HOP_CACHE[cache_key] = cached
-        return cached
-
-    def distance_value(self, next_agent, current_pos):
-        if next_agent is None:
-            return float("inf")
-        return float(np.linalg.norm(current_pos - next_agent.pos))
-
-    def relative_distance_weights(self, distances):
-        weights = [0.0 for _ in distances]
-        ranked = sorted(
-            (float(distance), idx)
-            for idx, distance in enumerate(distances)
-            if np.isfinite(float(distance))
-        )
-        if not ranked:
-            return [1.0 for _ in distances]
-
-        candidate_count = len(ranked)
-        for rank, (_distance, idx) in enumerate(ranked):
-            weights[idx] = float(candidate_count - rank)
-        return weights
-
     def _source_is_citable(self, source):
         source = _clean_text(source)
         display = display_source(source)
@@ -204,204 +100,6 @@ class Thought:
             and display != "unknown"
             and ("|" in source or "://" in display or "/" in display or "." in display)
         )
-
-    def _specific_text_score(self, text):
-        text = _clean_text(text)
-        if not text:
-            return 0.0
-        number_score = len(SPECIFIC_DETAIL_RE.findall(text)) * 2.0
-        acronym_score = len(ACRONYM_RE.findall(text)) * 1.5
-        proper_score = len(PROPER_NOUN_RE.findall(text)) * 0.75
-        return number_score + acronym_score + proper_score
-
-    def _cited_record_score(self, record, utility=0.0):
-        if not self._source_is_citable((record or {}).get("source", "")):
-            return 0.0
-        text = _clean_text((record or {}).get("text", ""))
-        score = self._specific_text_score(text)
-        if self._should_cite(record, utility=utility):
-            score += 1.0
-        return score
-
-    def _connector_cited_fact_score(self, conn):
-        key = self._connector_identity(conn)
-        cached = _CONNECTOR_FACT_SCORE_CACHE.get(key)
-        if cached is not None:
-            return cached
-        cached = self._connector_cited_score_cache.get(key)
-        if cached is not None:
-            return cached
-
-        if not self._source_is_citable(getattr(conn, "source", "")):
-            _CONNECTOR_FACT_SCORE_CACHE[key] = 0.0
-            self._connector_cited_score_cache[key] = 0.0
-            return 0.0
-
-        clause = self._connection_clause_text(conn)
-        score = self._specific_text_score(clause)
-
-        specificity = self._specificity_key(conn, clause)
-        for value in specificity[:3]:
-            try:
-                score += max(0, int(value))
-            except (TypeError, ValueError):
-                continue
-
-        predicate_values = self._predicate_specific_values(conn)
-        score += len(predicate_values) * 2.0
-        _CONNECTOR_FACT_SCORE_CACHE[key] = score
-        self._connector_cited_score_cache[key] = score
-        return score
-
-    def _agent_cited_fact_score(self, agent):
-        key = getattr(agent, "index", None)
-        cached = _AGENT_FACT_SCORE_CACHE.get(key)
-        if cached is not None:
-            return cached
-        cached = self._agent_cited_score_cache.get(key)
-        if cached is not None:
-            return cached
-
-        records = self._context_records_for_agent(agent)
-        if not records:
-            _AGENT_FACT_SCORE_CACHE[key] = 0.0
-            self._agent_cited_score_cache[key] = 0.0
-            return 0.0
-        scores = sorted(
-            (
-                self._cited_record_score(record)
-                for record in records[:MAX_CONTEXT_SAMPLES * 3]
-            ),
-            reverse=True,
-        )
-        score = sum(score for score in scores[:MAX_CONTEXT_SAMPLES])
-        _AGENT_FACT_SCORE_CACHE[key] = score
-        self._agent_cited_score_cache[key] = score
-        return score
-
-    def _cited_fact_weight_multiplier(self, conn, next_agent):
-        score = (
-            self._connector_cited_fact_score(conn) * THOUGHT_CITED_FACT_WEIGHT
-            + self._agent_cited_fact_score(next_agent) * THOUGHT_DESTINATION_CITED_FACT_WEIGHT
-        )
-        capped = min(float(THOUGHT_CITED_FACT_WEIGHT_CAP), max(0.0, score))
-        return 1.0 + capped
-
-    def _nearest_goal_distance(self, position):
-        if position is None:
-            return None
-        distances = []
-        for agent in self.goal_agents:
-            goal_pos = getattr(agent, "pos", None)
-            if goal_pos is None:
-                continue
-            try:
-                distances.append(float(np.linalg.norm(position - goal_pos)))
-            except Exception:
-                continue
-        if not distances:
-            return None
-        return min(distances)
-
-    def _apply_spatial_progress_reward(self, previous_pos, next_pos):
-        previous_distance = self._nearest_goal_distance(previous_pos)
-        next_distance = self._nearest_goal_distance(next_pos)
-        if previous_distance is None or next_distance is None:
-            return 0.0
-        if previous_distance <= 0.0 or next_distance >= previous_distance:
-            return 0.0
-
-        progress = (previous_distance - next_distance) / previous_distance
-        recovery_room = max(0.0, STARTING_SCORE - float(self.score))
-        reward = recovery_room * _clamp01(progress) * SPATIAL_PROGRESS_REWARD_RATE
-        self.score = min(STARTING_SCORE, self.score + reward)
-        return reward
-
-    def _specific_detail_points(self, details):
-        points = 0
-        for detail in list(details or []):
-            specificity = list(detail.get("specificity", ()) or ())
-            value_count = 0
-            for value in specificity[:3]:
-                try:
-                    value_count += max(0, int(value))
-                except (TypeError, ValueError):
-                    continue
-            points += max(1, value_count)
-        return points
-
-    def _apply_specific_detail_reward(self, details):
-        points = self._specific_detail_points(details)
-        if points <= 0:
-            return 0.0
-
-        recovery_room = max(0.0, STARTING_SCORE - float(self.score))
-        if recovery_room <= 0.0:
-            return 0.0
-
-        saturation = max(1.0, float(SPECIFIC_DETAIL_REWARD_SATURATION))
-        specificity_share = points / (points + saturation)
-        reward = recovery_room * _clamp01(specificity_share) * SPECIFIC_DETAIL_REWARD_RATE
-        self.score = min(STARTING_SCORE, self.score + reward)
-        return reward
-
-    def _apply_connection_score_penalty(self, conn):
-        utility = _clamp01(float(getattr(conn, "utility", 0.0) or 0.0))
-        utility = max(_clamp01(UTILITY_FLOOR), utility)
-        penalty_rate = _clamp01(THOUGHT_UTILITY_PENALTY_RATE)
-        multiplier = 1.0 - ((1.0 - utility) * penalty_rate)
-        multiplier = max(_clamp01(THOUGHT_MIN_STEP_SCORE_MULTIPLIER), min(1.0, multiplier))
-        self.score *= multiplier
-        return multiplier
-
-    def valid_candidates(self):
-        if not self.alive:
-            return [], [], None
-        hops, cached_distances = self._candidate_hops_for_current()
-        if not hops:
-            return [], [], self.current_asu.pos
-
-        current_pos = self.current_asu.pos
-        valid_candidates = []
-        distances = []
-        cited_multipliers = []
-        tense_multipliers = []
-
-        for hop, distance in zip(hops, cached_distances):
-            conn, next_agent, _reversed_hop = hop
-            if next_agent.index == self.last_asu_idx:
-                continue
-
-            valid_candidates.append(hop)
-            distances.append(distance)
-            cited_multipliers.append(self._cited_fact_weight_multiplier(conn, next_agent))
-            tense_multipliers.append(self._tense_preference_multiplier(conn))
-
-        distance_weights = self.relative_distance_weights(distances)
-        weights = [
-            max(0.01, distance_weight) * max(1.0, cited_multiplier) * max(0.25, tense_multiplier)
-            for distance_weight, cited_multiplier, tense_multiplier in zip(
-                distance_weights,
-                cited_multipliers,
-                tense_multipliers,
-            )
-        ]
-        return valid_candidates, weights, current_pos
-
-    def _weighted_unique_sample(self, candidates, weights, k):
-        remaining_candidates = list(candidates)
-        remaining_weights = list(weights)
-        sampled = []
-        sample_count = min(k, len(remaining_candidates))
-        for _ in range(sample_count):
-            if not remaining_candidates:
-                break
-            choice = random.choices(remaining_candidates, weights=remaining_weights, k=1)[0]
-            idx = remaining_candidates.index(choice)
-            sampled.append(choice)
-            remaining_candidates.pop(idx)
-            remaining_weights.pop(idx)
-        return sampled
 
     def _context_records_for_agent(self, agent):
         if agent is None:
@@ -427,6 +125,8 @@ class Thought:
         source = _clean_text((record or {}).get("source", "unknown"))
         if not text:
             return ""
+        if not is_usable_clause_text(text):
+            return ""
         if self._should_cite(record, utility=utility):
             if source not in self.collected_sources:
                 self.collected_sources.append(source)
@@ -448,22 +148,12 @@ class Thought:
         if len(self.collected_notes) > 40:
             del self.collected_notes[:-40]
 
-    def gather_stop_details(self, extra_connections=None):
+    def gather_stop_details(self):
         records = self._context_records_for_agent(self.current_asu)
         for record in records[:MAX_CONTEXT_SAMPLES]:
             detail = self._detail_from_record(record)
             if detail:
                 self._remember_note(detail)
-
-        for hop in list(extra_connections or [])[:MAX_ADJACENT_SAMPLES]:
-            conn, next_agent, _reversed_hop = self._hop_parts(hop)
-            if conn is None or next_agent is None:
-                continue
-            detail = f"Adjacent topic: {next_agent.ASU}"
-            target_records = self._context_records_for_agent(next_agent)
-            if target_records:
-                detail = f"{detail} | {self._detail_from_record(target_records[0], utility=getattr(conn, 'utility', 0.0))}"
-            self._remember_note(detail, adjacent=True)
 
     def _connector_identity(self, conn):
         source_agent = getattr(conn, "source_agent", None)
@@ -479,12 +169,7 @@ class Thought:
         target = getattr(conn, "target", None)
         if target is None:
             return ""
-        predicate_text = _clean_text(getattr(target, "ASU", ""))
-        predicate_endpoint = getattr(conn, "predicate", None)
-        modifiers = " ".join(predicate_endpoint.modifier_value()).strip() if predicate_endpoint else ""
-        if modifiers:
-            predicate_text = f"{modifiers} {predicate_text}".strip()
-        return predicate_text
+        return _clean_text(getattr(target, "ASU", ""))
 
     def _specific_value_key(self, value):
         if isinstance(value, dict):
@@ -502,41 +187,6 @@ class Thought:
                 seen.add(key)
                 values.append(value)
         return values
-
-    def _temporal_context_from_specifics(self, specifics):
-        for value in list(specifics or []):
-            if isinstance(value, dict) and value.get("kind") == "temporal_context":
-                return dict(value)
-        return {}
-
-    def _connection_temporal_context(self, conn):
-        return self._temporal_context_from_specifics(getattr(conn, "connection_specifics", []))
-
-    def _connection_tense_score(self, conn):
-        temporal = self._connection_temporal_context(conn)
-        try:
-            return max(-1.0, min(1.0, float(temporal.get("tense_score", 0.0))))
-        except (TypeError, ValueError):
-            pass
-
-        current_tense = _clean_text(temporal.get("current_tense", "")).lower()
-        if current_tense == "past":
-            return -1.0
-        if current_tense == "future":
-            return 1.0
-        return 0.0
-
-    def _tense_preference_multiplier(self, conn):
-        preferred_score = self._preferred_tense_score()
-        if preferred_score == 0.0:
-            return 1.0
-
-        alignment = preferred_score * self._connection_tense_score(conn)
-        if alignment > 0.0:
-            return 1.0 + (alignment * float(THOUGHT_TENSE_PREFERENCE_WEIGHT))
-        if alignment < 0.0:
-            return max(0.25, 1.0 + (alignment * float(THOUGHT_TENSE_OPPOSITION_PENALTY)))
-        return 1.0
 
     def _predicate_specific_values(self, conn):
         values = []
@@ -558,6 +208,13 @@ class Thought:
 
     def _predicate_has_specific_data(self, conn):
         return bool(self._predicate_specific_values(conn))
+
+    def _connection_has_specific_data(self, conn, clause=""):
+        if self._predicate_has_specific_data(conn):
+            return True
+        if self._structured_specific_values(conn):
+            return True
+        return bool(SPECIFIC_DETAIL_RE.search(_clean_text(clause)))
 
     def _specificity_key(self, conn, clause):
         predicate_values = self._predicate_specific_values(conn)
@@ -588,10 +245,12 @@ class Thought:
             source = _clean_text(getattr(conn, "source", ""))
             if not self._source_is_citable(source):
                 continue
-            if not self._predicate_has_specific_data(conn):
-                continue
             clause = self._connection_clause_text(conn)
             if not clause:
+                continue
+            if not is_usable_clause_text(clause):
+                continue
+            if not self._connection_has_specific_data(conn, clause):
                 continue
             details.append(
                 {
@@ -599,8 +258,9 @@ class Thought:
                     "text": clause,
                     "source": source,
                     "specificity": self._specificity_key(conn, clause),
+                    "subject_specifics": list(getattr(conn, "subject_specifics", []) or []),
                     "predicate_specifics": list(getattr(conn, "predicate_specifics", []) or []),
-                    "temporal": self._connection_temporal_context(conn),
+                    "connection_specifics": list(getattr(conn, "connection_specifics", []) or []),
                 }
             )
 
@@ -634,20 +294,8 @@ class Thought:
                 break
         return details[:limit]
 
-    def choose_next_hop(self):
-        candidates, weights, current_pos = self.valid_candidates()
-        if not candidates:
-            return None, [], current_pos
-        preview = self._weighted_unique_sample(candidates, weights, MAX_ADJACENT_SAMPLES)
-        choice = random.choices(candidates, weights=weights, k=1)[0]
-        return choice, preview, current_pos
-
     def _target_tokens(self, text):
-        return [
-            token
-            for token in TARGET_TOKEN_RE.findall(_clean_text(text).lower())
-            if token and token not in STOPWORD_TOKENS
-        ]
+        return target_tokens(_clean_text(text), min_length=1)
 
     def _lexical_match(self, candidate, target):
         candidate = _clean_text(candidate)
@@ -663,20 +311,31 @@ class Thought:
             _LEXICAL_MATCH_CACHE[key] = 0.0
             return 0.0
         overlap = candidate_tokens & target_tokens
-        if not overlap:
+        distinctive_tokens = distinctive_target_tokens(target_tokens)
+        if distinctive_tokens and not (overlap & distinctive_tokens):
+            _LEXICAL_MATCH_CACHE[key] = 0.0
+            return 0.0
+        if not distinctive_tokens and not overlap:
             _LEXICAL_MATCH_CACHE[key] = 0.0
             return 0.0
         precision = len(overlap) / len(candidate_tokens)
         recall = len(overlap) / len(target_tokens)
-        score = max(precision, 0.85 * recall)
+        distinctive_coverage = (
+            len(overlap & distinctive_tokens) / len(distinctive_tokens)
+            if distinctive_tokens else 0.0
+        )
+        score = max(precision, 0.85 * recall, distinctive_coverage)
         _LEXICAL_MATCH_CACHE[key] = score
         return score
 
     def _grounding_lexical_match(self, candidate, target):
         candidate_tokens = set(self._target_tokens(candidate))
         target_tokens = set(self._target_tokens(target))
-        required_candidate_tokens = min(2, len(target_tokens))
-        if len(candidate_tokens) < required_candidate_tokens:
+        distinctive_tokens = distinctive_target_tokens(target_tokens)
+        overlap = candidate_tokens & target_tokens
+        if distinctive_tokens and not (overlap & distinctive_tokens):
+            return 0.0
+        if not distinctive_tokens and not overlap:
             return 0.0
         return self._lexical_match(candidate, target)
 
@@ -764,24 +423,17 @@ class Thought:
             text = _clean_text(detail.get("text", ""))
             if not text:
                 continue
+            if not is_usable_clause_text(text):
+                continue
             records.append(
                 {
                     "text": text.rstrip(".") + ".",
                     "source": _clean_text(detail.get("source", "")),
                     "specificity": list(detail.get("specificity", ()) or ()),
-                    "temporal": dict(detail.get("temporal") or {}),
                     "role": "specific_context",
                 }
             )
         return records
-
-    def _step_temporal_context(self, step):
-        if not isinstance(step, dict):
-            return {}
-        temporal = step.get("temporal")
-        if isinstance(temporal, dict):
-            return dict(temporal)
-        return self._temporal_context_from_specifics(step.get("connection_specifics", []))
 
     def _path_texts(self):
         texts = []
@@ -798,34 +450,16 @@ class Thought:
         append_text(self.current_asu.ASU)
         for step in self.history[1:]:
             append_text(step.get("subject", ""))
+            append_text(step.get("subject_modifier", ""))
+            append_text(f"{step.get('subject', '')} {step.get('subject_modifier', '')}")
             append_text(step.get("predicate", ""))
+            append_text(step.get("predicate_modifier", ""))
+            append_text(f"{step.get('predicate', '')} {step.get('predicate_modifier', '')}")
             append_text(step.get("evidence_text", ""))
             append_text(self._step_clause(step))
             for record in self._step_specific_records(step):
                 append_text(record.get("text", ""))
         return texts
-
-    def _current_target_b_match(self):
-        current_texts = [self.current_asu.ASU]
-        for step in self.history[-MAX_CONTEXT_SAMPLES:]:
-            if not isinstance(step, dict):
-                continue
-            current_texts.append(self._step_clause(step))
-            current_texts.append(step.get("predicate", ""))
-            for record in self._step_specific_records(step):
-                current_texts.append(record.get("text", ""))
-        return self._best_target_match(current_texts, self.target_b, self.success_queries)
-
-    def _current_target_b_lexical_match(self):
-        current_texts = [self.current_asu.ASU]
-        for step in self.history[-MAX_CONTEXT_SAMPLES:]:
-            if not isinstance(step, dict):
-                continue
-            current_texts.append(self._step_clause(step))
-            current_texts.append(step.get("predicate", ""))
-            for record in self._step_specific_records(step):
-                current_texts.append(record.get("text", ""))
-        return self._best_lexical_target_match(current_texts, self.target_b, self.success_queries)
 
     def _path_target_matches(self):
         path_texts = self._path_texts()
@@ -838,42 +472,6 @@ class Thought:
         target_a_match = self._best_lexical_target_match(path_texts, self.start_target)
         target_b_match = self._best_lexical_target_match(path_texts, self.target_b, self.success_queries)
         return target_a_match, target_b_match
-
-    def _should_run_semantic_bridge_check(self):
-        hop_count = len(self.history) - 1
-        if hop_count < MIN_SUCCESS_STEPS:
-            return False
-        interval = max(1, int(THOUGHT_SEMANTIC_CHECK_INTERVAL))
-        return hop_count >= MAX_THOUGHT_HOPS or hop_count % interval == 0
-
-    def _has_grounded_bridge(self):
-        if (len(self.history) - 1) < MIN_SUCCESS_STEPS:
-            return False
-
-        target_a_lexical, target_b_lexical = self._path_target_lexical_matches()
-        current_b_lexical = self._current_target_b_lexical_match()
-        if (
-            target_a_lexical < PATH_TARGET_MATCH_THRESHOLD
-            or target_b_lexical < PATH_TARGET_MATCH_THRESHOLD
-            or max(current_b_lexical, target_b_lexical) < PATH_TARGET_MATCH_THRESHOLD
-        ):
-            return False
-
-        if not self._should_run_semantic_bridge_check():
-            return False
-
-        target_a_match, target_b_match = self._path_target_matches()
-        current_b_match = self._current_target_b_match()
-        return (
-            target_a_match >= PATH_TARGET_MATCH_THRESHOLD
-            and target_b_match >= PATH_TARGET_MATCH_THRESHOLD
-            and target_a_lexical >= PATH_TARGET_MATCH_THRESHOLD
-            and target_b_lexical >= PATH_TARGET_MATCH_THRESHOLD
-            and max(current_b_match, target_b_match) >= SUCCESS_SIMILARITY_THRESHOLD
-        )
-
-    def _confidence_label(self, target_a_match, target_b_match):
-        return self._confidence_label_for_score(self.score, target_a_match, target_b_match)
 
     def _confidence_label_for_score(self, support_score, target_a_match, target_b_match):
         blended = ((float(support_score or 0.0) / 100.0) + target_a_match + target_b_match) / 3.0
@@ -928,19 +526,38 @@ class Thought:
         end = self.target_b or self.current_asu.ASU
         path_clauses = []
         clause_records = []
+        seen_path_clauses = set()
+        seen_records = set()
+
+        def record_key(record):
+            text = _clean_text((record or {}).get("text", "")).lower()
+            source = display_source((record or {}).get("source", "")).rstrip("/").lower()
+            role = _clean_text((record or {}).get("role", "path")).lower() or "path"
+            return (role, text, source)
+
+        def add_record(record):
+            key = record_key(record)
+            if not key[1] or key in seen_records:
+                return
+            seen_records.add(key)
+            clause_records.append(record)
+
         for step in self.history[1:]:
             clause = self._step_clause(step)
             if clause:
-                path_clauses.append(clause)
-                clause_records.append(
+                clause_key = _clean_text(clause).lower()
+                if clause_key not in seen_path_clauses:
+                    seen_path_clauses.add(clause_key)
+                    path_clauses.append(clause)
+                add_record(
                     {
                         "text": clause,
                         "source": _clean_text(step.get("source", "")),
                         "role": "path",
-                        "temporal": self._step_temporal_context(step),
                     }
                 )
-            clause_records.extend(self._step_specific_records(step))
+            for record in self._step_specific_records(step):
+                add_record(record)
 
         recent_records = clause_records[-(6 + (6 * 3)):]
         supporting_clauses = [
@@ -974,107 +591,10 @@ class Thought:
             "notes": list(self.collected_notes),
             "target_a": self.start_target or start,
             "target_b": self.target_b or end,
+            "direction": getattr(self, "route_id", ""),
+            "route": (
+                f"{getattr(self, 'route_start_label', '')}->{getattr(self, 'route_goal_label', '')}"
+                if getattr(self, "route_start_label", "") or getattr(self, "route_goal_label", "")
+                else ""
+            ),
         }
-
-    def move(self):
-        if not self.alive:
-            return False
-        if (len(self.history) - 1) >= MAX_THOUGHT_HOPS:
-            self.alive = False
-            self.termination_reason = "max_hops"
-            return False
-
-        hop, preview, current_pos = self.choose_next_hop()
-        self.gather_stop_details(extra_connections=preview)
-        conn, next_agent, reversed_hop = self._hop_parts(hop)
-        if conn is None or next_agent is None:
-            self.alive = False
-            self.termination_reason = "endpoint"
-            return False
-
-        temporal_context = self._connection_temporal_context(conn)
-        specific_details = self._specific_context_details(conn)
-        for detail in specific_details:
-            source = detail.get("source", "")
-            if self._source_is_citable(source) and source not in self.collected_sources:
-                self.collected_sources.append(source)
-            self._remember_note(f"{detail.get('text', '')} [{display_source(source)}]")
-
-        self.last_asu_idx = self.current_asu.index
-        self.current_asu = next_agent
-        previous_pos = current_pos
-        next_pos = self.current_asu.pos
-        score_multiplier = self._apply_connection_score_penalty(conn)
-        spatial_reward = self._apply_spatial_progress_reward(previous_pos, next_pos)
-        specific_reward = self._apply_specific_detail_reward(specific_details)
-        if self._source_is_citable(conn.source) and conn.source not in self.collected_sources:
-            self.collected_sources.append(conn.source)
-
-        subject_text = conn.source_agent.ASU if conn.source_agent is not None else ""
-        predicate_text = conn.target.ASU if conn.target is not None else ""
-        if conn.subject.modifier_idx:
-            subject_mods = " ".join(conn.subject.modifier_value()).strip()
-            if subject_mods:
-                subject_text = f"{subject_mods} {subject_text}".strip()
-        if conn.predicate.modifier_idx:
-            predicate_mods = " ".join(conn.predicate.modifier_value()).strip()
-            if predicate_mods:
-                predicate_text = f"{predicate_mods} {predicate_text}".strip()
-
-        if conn.evidence_text:
-            self._remember_note(self._detail_from_record({"text": conn.evidence_text, "source": conn.source}, utility=getattr(conn, "utility", 0.0)))
-
-        self.history.append(
-            {
-                "subject": subject_text,
-                "subject_truth": conn.subject.truth,
-                "subject_tense": conn.subject.tense,
-                "subject_quant": conn.subject.quantifier,
-                "subject_modifier": " ".join(conn.subject.modifier_value()).strip(),
-                "subject_specifics": list(conn.subject_specifics),
-                "relation_id": conn.relation_index,
-                "truth": conn.truth,
-                "predicate": predicate_text,
-                "predicate_truth": conn.predicate.truth,
-                "predicate_tense": conn.predicate.tense,
-                "predicate_quant": conn.predicate.quantifier,
-                "predicate_modifier": " ".join(conn.predicate.modifier_value()).strip(),
-                "predicate_specifics": list(conn.predicate_specifics),
-                "connection_specifics": list(conn.connection_specifics),
-                "temporal": temporal_context,
-                "previous_agent_ids": list(conn.previous_agent_ids),
-                "previous_agent": "",
-                "source": conn.source,
-                "evidence_text": conn.evidence_text,
-                "specific_details": specific_details,
-                "traversal_reversed": reversed_hop,
-                "utility": round(float(getattr(conn, "utility", 0.0) or 0.0), 4),
-                "score_multiplier": round(score_multiplier, 4),
-                "spatial_reward": round(spatial_reward, 4),
-                "specific_reward": round(specific_reward, 4),
-                "score": round(self.score, 2),
-                "adjacent_topics": [
-                    sample_next.ASU
-                    for _sample_conn, sample_next, _sample_reversed in (
-                        self._hop_parts(sample)
-                        for sample in preview
-                    )
-                    if sample_next is not None
-                ],
-                "details": list(self.collected_notes[-3:]),
-            }
-        )
-
-        self.gather_stop_details()
-
-        if self._has_grounded_bridge():
-            self.successful = True
-            self.success_payload = self._build_relationship_statement()
-            self.alive = False
-            self.termination_reason = "endpoint"
-            return True
-
-        if self.score < LOW_SCORE_THRESHOLD:
-            self.alive = False
-            self.termination_reason = "dead"
-        return True

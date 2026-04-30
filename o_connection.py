@@ -69,18 +69,6 @@ class ConnectionEndpoint:
     def ASU_idx(self, value):
         self.subject_predicate_id = self._normalize_asu_id(value)
 
-    @property
-    def sp_id(self):
-        return self.subject_predicate_id
-
-    @sp_id.setter
-    def sp_id(self, value):
-        self.subject_predicate_id = self._normalize_asu_id(value)
-
-    @classmethod
-    def register_asu(cls, asu):
-        return cls._normalize_asu_id(asu)
-
     @classmethod
     def asu_from_idx(cls, idx):
         return concept_from_index(cls._normalize_optional_id(idx, default=-1))
@@ -94,10 +82,6 @@ class ConnectionEndpoint:
             return cls._normalize_optional_id(modifier, default=-1)
         text = " ".join(str(modifier or "").strip().split())
         return get_literal_index(text) if text else -1
-
-    @classmethod
-    def modifier_from_idx(cls, idx):
-        return literal_from_index(idx)
 
     def modifier_value(self):
         return [literal_from_index(idx) for idx in self.modifier_idx if idx >= 0]
@@ -123,9 +107,6 @@ class ConnectionEndpoint:
         if normalized_idx < 0:
             return []
         return list(cls._context_registry.get(normalized_idx, ()))
-
-    def contexts(self):
-        return self.contexts_from_idx(self.subject_predicate_id)
 
     def __reduce__(self):
         return (
@@ -217,14 +198,6 @@ class Connector:
     @property
     def target(self): # returns predicate agent
         return self._agent_map.get(self._predicate_idx)
-
-    @property
-    def subject_agent(self): # compatibility alias
-        return self.source_agent
-
-    @property
-    def predicate_agent(self): # compatibility alias
-        return self.target
 
     @property
     def truth(self):

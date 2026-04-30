@@ -16,8 +16,8 @@ const int MAX_AGENTS = 64000;
 const int MAX_CONNECTIONS = 80000;
 const int CONNECTION_RECORD_SIZE = 40;
 const float DAMPING = 0.94f;
-const float REST_DISTANCE = 32.0f;
-const float REPEL_EQUIL_DIST = 128.0f;
+const float MIN_REST_DISTANCE = 12.6f;
+const float MAX_REST_DISTANCE = 33.6f;
 const float MIN_SPRING_STRENGTH = 0.014f;
 const float MAX_SPRING_STRENGTH = 0.075f;
 const float MAX_SPRING_FORCE = 3.25f;
@@ -58,11 +58,6 @@ struct LC {
   int predicateTenseExact;
   int predicateTruthExact;
 };
-
-bool is_negative_connection(const LC &connection) {
-  return connection.subjectTruthExact >= 0 ||
-         connection.predicateTruthExact >= 0;
-}
 
 struct GridKey {
   int x, y, z;
@@ -235,7 +230,8 @@ int main() {
         utility = 1.0f;
 
       float equilibrium_distance =
-          is_negative_connection(b) ? REPEL_EQUIL_DIST : REST_DISTANCE;
+          MAX_REST_DISTANCE -
+          (utility * (MAX_REST_DISTANCE - MIN_REST_DISTANCE));
       float displacement = dist - equilibrium_distance;
       float normalized_stretch = std::fabs(displacement) / equilibrium_distance;
       total_spring_stretch += normalized_stretch;

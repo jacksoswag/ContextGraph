@@ -1,6 +1,7 @@
 import re
 import sqlite3
 import threading
+from collections import OrderedDict
 from functools import lru_cache
 
 import numpy as np
@@ -10,11 +11,53 @@ from constants import (
     EMBEDDING_MODEL_NAME,
     MAX_MERGE_SIMILARITY,
     MIN_MERGE_SIMILARITY,
+    STOPWORD_TOKENS,
 )
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)?")
 EMBEDDING_MODEL = None
 _DB_CONNECTIONS = {}
+_WRITE_LOCK = threading.RLock()
+TEXT_VECTOR_CACHE_LIMIT = 32768
+_TEXT_VECTOR_CACHE = OrderedDict()
+CANONICAL_MODIFIER_CUES = frozenset(
+    {
+        "about",
+        "above",
+        "across",
+        "after",
+        "against",
+        "along",
+        "among",
+        "around",
+        "at",
+        "before",
+        "below",
+        "between",
+        "by",
+        "during",
+        "for",
+        "from",
+        "in",
+        "including",
+        "inside",
+        "into",
+        "near",
+        "of",
+        "on",
+        "over",
+        "out",
+        "per",
+        "through",
+        "to",
+        "under",
+        "using",
+        "via",
+        "with",
+        "within",
+        "without",
+    }
+)
 
 
 def normalize_text(text):
@@ -23,6 +66,44 @@ def normalize_text(text):
 
 def _clean_text(text):
     return " ".join(str(text or "").strip().split())
+
+
+def _canonical_quality(text):
+    clean = _clean_text(text)
+    tokens = [token.lower() for token in TOKEN_RE.findall(clean)]
+    if not tokens:
+        return (-1,)
+    cue_count = sum(1 for token in tokens if token in CANONICAL_MODIFIER_CUES)
+    dangling_cue = int(tokens[-1] in CANONICAL_MODIFIER_CUES)
+    meaningful = [
+        token
+        for token in tokens
+        if token not in CANONICAL_MODIFIER_CUES and token not in STOPWORD_TOKENS
+    ]
+    overlong = max(0, len(meaningful) - 5)
+    return (
+        -dangling_cue,
+        -cue_count,
+        min(len(meaningful), 5),
+        -overlong,
+        -len(clean),
+    )
+
+
+def _prefer_canonical(existing, incoming):
+    existing = _clean_text(existing)
+    incoming = _clean_text(incoming)
+    if not existing:
+        return incoming
+    if not incoming:
+        return existing
+    incoming_quality = _canonical_quality(incoming)
+    existing_quality = _canonical_quality(existing)
+    if incoming_quality > existing_quality:
+        return incoming
+    if incoming_quality < existing_quality and incoming_quality[:-1] != existing_quality[:-1]:
+        return existing
+    return incoming
 
 
 def vector_to_numpy(vect):
@@ -34,14 +115,6 @@ def vector_to_numpy(vect):
 
 def vector_to_list(vect):
     return [float(value) for value in vector_to_numpy(vect).tolist()]
-
-
-def _normalize_vector(vect):
-    array = vector_to_numpy(vect)
-    norm = float(np.linalg.norm(array))
-    if norm > 1e-12:
-        array = array / norm
-    return array
 
 
 def _vector_blob(vect):
@@ -149,72 +222,15 @@ def _clear_read_caches():
     concept_from_index.cache_clear()
     concept_vector_from_index.cache_clear()
     literal_from_index.cache_clear()
-    literal_vector_from_index.cache_clear()
     concept_vector_from_text.cache_clear()
 
 
-def _context_without_component(component_text, clause_text):
-    component = _clean_text(component_text)
-    clause = _clean_text(clause_text)
-    if not component or not clause:
-        return clause
-    trimmed = re.compile(re.escape(component), re.IGNORECASE).sub(" ", clause, count=1)
-    trimmed = _clean_text(trimmed)
-    return trimmed or clause
-
-
-def contextual_component_vector(text, clause_text="", focus_weight=0.8, context_weight=0.2):
-    component = _clean_text(text)
-    clause = _clean_text(clause_text)
-    if not component:
-        return []
-    component_vec = vector_to_numpy(_encode_text_vector(component, normalize=False))
-    if not clause or normalize_text(component) == normalize_text(clause):
-        return vector_to_list(_normalize_vector(component_vec))
-    rest_clause = _context_without_component(component, clause)
-    if not rest_clause:
-        return vector_to_list(_normalize_vector(component_vec))
-    context_vec = vector_to_numpy(_encode_text_vector(rest_clause, normalize=False))
-    blended = (component_vec * float(focus_weight)) + (context_vec * float(context_weight))
-    return vector_to_list(_normalize_vector(blended))
-
-
-def contextual_component_vectors(items, focus_weight=0.8, context_weight=0.2):
-    normalized_items = []
-    encode_inputs = []
-    for text, clause_text in list(items or []):
-        component = _clean_text(text)
-        clause = _clean_text(clause_text)
-        if not component:
-            normalized_items.append((component, clause, ""))
-            continue
-        rest_clause = ""
-        if clause and normalize_text(component) != normalize_text(clause):
-            rest_clause = _context_without_component(component, clause)
-        normalized_items.append((component, clause, rest_clause))
-        encode_inputs.append(component)
-        if rest_clause:
-            encode_inputs.append(rest_clause)
-
-    encoded = _encode_text_vectors(encode_inputs, normalize=False)
-    vectors = []
-    for component, _clause, rest_clause in normalized_items:
-        if not component:
-            vectors.append([])
-            continue
-        component_vec = vector_to_numpy(encoded.get(component, []))
-        if not rest_clause:
-            vectors.append(vector_to_list(_normalize_vector(component_vec)))
-            continue
-        context_vec = vector_to_numpy(encoded.get(rest_clause, []))
-        blended = (component_vec * float(focus_weight)) + (context_vec * float(context_weight))
-        vectors.append(vector_to_list(_normalize_vector(blended)))
-    return vectors
-
-
-def vector_magnitude_signal(vect):
-    magnitude = float(np.linalg.norm(vector_to_numpy(vect)))
-    return float(max(0.0, min(1.0, magnitude / (magnitude + 1.0))))
+def _remember_text_vector(cleaned, normalize, vector):
+    key = (cleaned, bool(normalize))
+    _TEXT_VECTOR_CACHE[key] = tuple(vector)
+    _TEXT_VECTOR_CACHE.move_to_end(key)
+    while len(_TEXT_VECTOR_CACHE) > TEXT_VECTOR_CACHE_LIMIT:
+        _TEXT_VECTOR_CACHE.popitem(last=False)
 
 
 def cosine_similarity(left, right):
@@ -340,18 +356,31 @@ def get_literal_index(text, vect=None, path=DEFAULT_MAP_PATH):
     if row is not None:
         return int(row[0])
     vector = vector_to_list(vect) if vect else []
-    with conn:
-        next_id = conn.execute("SELECT COALESCE(MAX(id), -1) + 1 FROM literals").fetchone()[0]
-        conn.execute(
-            "INSERT INTO literals(id, text, vector, merge_count) VALUES(?, ?, ?, 1)",
-            (int(next_id), cleaned, _vector_blob(vector)),
-        )
-        conn.execute(
-            "INSERT INTO literal_aliases(normalized, literal_id) VALUES(?, ?)",
-            (normalized, int(next_id)),
-        )
+    with _WRITE_LOCK:
+        row = conn.execute(
+            "SELECT literal_id FROM literal_aliases WHERE normalized=?",
+            (normalized,),
+        ).fetchone()
+        if row is not None:
+            return int(row[0])
+
+        with conn:
+            cursor = conn.execute(
+                "INSERT INTO literals(text, vector, merge_count) VALUES(?, ?, 1)",
+                (cleaned, _vector_blob(vector)),
+            )
+            literal_id = int(cursor.lastrowid)
+            conn.execute(
+                "INSERT OR IGNORE INTO literal_aliases(normalized, literal_id) VALUES(?, ?)",
+                (normalized, literal_id),
+            )
+            row = conn.execute(
+                "SELECT literal_id FROM literal_aliases WHERE normalized=?",
+                (normalized,),
+            ).fetchone()
+
     _clear_read_caches()
-    return int(next_id)
+    return int(row[0]) if row is not None else literal_id
 
 
 @lru_cache(maxsize=65536)
@@ -362,16 +391,6 @@ def literal_from_index(index, path=DEFAULT_MAP_PATH):
         return ""
     row = _connect(path).execute("SELECT text FROM literals WHERE id=?", (index,)).fetchone()
     return str(row[0]) if row else ""
-
-
-@lru_cache(maxsize=65536)
-def literal_vector_from_index(index, path=DEFAULT_MAP_PATH):
-    try:
-        index = int(index)
-    except (TypeError, ValueError):
-        return []
-    row = _connect(path).execute("SELECT vector FROM literals WHERE id=?", (index,)).fetchone()
-    return _vector_from_blob(row[0]) if row else []
 
 
 @lru_cache(maxsize=65536)
@@ -421,6 +440,10 @@ def _encode_text_vector(text, normalize=True):
     cleaned = _clean_text(text)
     if not cleaned:
         return []
+    cached = _TEXT_VECTOR_CACHE.get((cleaned, bool(normalize)))
+    if cached is not None:
+        _TEXT_VECTOR_CACHE.move_to_end((cleaned, bool(normalize)))
+        return list(cached)
     return list(_encode_text_vector_cached(cleaned, bool(normalize)))
 
 
@@ -445,10 +468,16 @@ def _encode_text_vectors(texts, normalize=True):
     except Exception:
         return {cleaned: _encode_text_vector(cleaned, normalize=normalize) for cleaned in cleaned_values}
 
-    return {
-        cleaned: vector_to_list(encoded)
-        for cleaned, encoded in zip(cleaned_values, encoded_values)
-    }
+    vectors = {}
+    for cleaned, encoded in zip(cleaned_values, encoded_values):
+        vector = vector_to_list(encoded)
+        _remember_text_vector(cleaned, normalize, vector)
+        vectors[cleaned] = vector
+    return vectors
+
+
+def precache_text_vectors(texts, normalize=True):
+    return _encode_text_vectors(texts, normalize=normalize)
 
 
 @lru_cache(maxsize=16384)
@@ -464,31 +493,6 @@ def _encode_text_vector_cached(cleaned, normalize):
         except Exception:
             pass
     return []
-
-
-def str_to_magnitude_vector(text):
-    return _encode_text_vector(text, normalize=False)
-
-
-def text_magnitude_signal(text):
-    vector = str_to_magnitude_vector(text)
-    if not vector:
-        return 0.0
-    return vector_magnitude_signal(vector)
-
-
-def concept_magnitude_signal(index, path=DEFAULT_MAP_PATH):
-    vector = concept_vector_from_index(index, path=path)
-    if vector:
-        return vector_magnitude_signal(vector)
-    return text_magnitude_signal(concept_from_index(index, path=path))
-
-
-def literal_magnitude_signal(index, path=DEFAULT_MAP_PATH):
-    vector = literal_vector_from_index(index, path=path)
-    if vector:
-        return vector_magnitude_signal(vector)
-    return text_magnitude_signal(literal_from_index(index, path=path))
 
 
 def _specifics_surface_text(specifics):
@@ -538,15 +542,6 @@ def _specifics_signal(*groups):
     return min(1.0, count / 4.0)
 
 
-def _evidence_signal(text):
-    text = _clean_text(text)
-    if not text:
-        return 0.0
-    token_signal = _token_specificity_signal(text, cap=18)
-    figure_signal = 1.0 if re.search(r"(\d|%|\b[A-Z]{2,}\b)", text) else 0.0
-    return max(token_signal, figure_signal)
-
-
 def connector_utility(
     subject_index,
     relation_index,
@@ -571,41 +566,14 @@ def connector_utility(
         _token_specificity_signal(predicate_text),
         _specifics_signal(predicate_specifics, predicate_modifiers),
     )
-    relation_score = max(
+    connective_specificity = max(
         _token_specificity_signal(relation_text, cap=3),
         _specifics_signal(connection_specifics),
     )
-    endpoint_score = (subject_score + predicate_score) / 2.0
-    detail_score = max(
-        _specifics_signal(
-            subject_specifics,
-            predicate_specifics,
-            connection_specifics,
-            subject_modifiers,
-            predicate_modifiers,
-        ),
-        _evidence_signal(evidence_text),
-    )
-    utility = 0.12 + (0.38 * endpoint_score) + (0.25 * relation_score) + (0.25 * detail_score)
+    actant_specificity = (subject_score + predicate_score) / 2.0
+    inverse_connective_specificity = 1.0 - connective_specificity
+    utility = 0.05 + (0.75 * actant_specificity) + (0.20 * inverse_connective_specificity)
     return float(max(0.0, min(1.0, utility)))
-
-
-def concept_similarity(left_index, right_index, path=DEFAULT_MAP_PATH):
-    return text_similarity(
-        concept_from_index(left_index, path=path),
-        concept_from_index(right_index, path=path),
-    )
-
-
-def literal_similarity(left_index, right_index, path=DEFAULT_MAP_PATH):
-    left_vector = literal_vector_from_index(left_index, path=path)
-    right_vector = literal_vector_from_index(right_index, path=path)
-    if left_vector and right_vector:
-        return cosine_similarity(left_vector, right_vector)
-    return text_similarity(
-        literal_from_index(left_index, path=path),
-        literal_from_index(right_index, path=path),
-    )
 
 
 def get_or_create_index(text, vect, path=DEFAULT_MAP_PATH):
@@ -620,50 +588,93 @@ def get_or_create_index(text, vect, path=DEFAULT_MAP_PATH):
         (normalized,),
     ).fetchone()
     if row is not None:
-        return int(row[0])
+        idx = int(row[0])
+        existing = conn.execute(
+            "SELECT canonical FROM concepts WHERE id=?",
+            (idx,),
+        ).fetchone()
+        if existing is not None:
+            preferred = _prefer_canonical(existing[0], cleaned)
+            if preferred != existing[0]:
+                with conn:
+                    conn.execute(
+                        "UPDATE concepts SET canonical=? WHERE id=?",
+                        (preferred, idx),
+                    )
+                    _store_concept_terms(conn, idx, preferred, cleaned)
+                _clear_read_caches()
+        return idx
 
-    with conn:
-        _ensure_vector_dimension(conn, len(vector))
-        match = _best_concept_match(conn, vector, cleaned)
-        if match and match["similarity"] >= match["threshold"]:
-            idx = int(match["index"])
-            row = conn.execute(
-                "SELECT canonical, vector, merge_count FROM concepts WHERE id=?",
+    with _WRITE_LOCK:
+        row = conn.execute(
+            "SELECT concept_id FROM concept_aliases WHERE normalized=?",
+            (normalized,),
+        ).fetchone()
+        if row is not None:
+            idx = int(row[0])
+            existing = conn.execute(
+                "SELECT canonical FROM concepts WHERE id=?",
                 (idx,),
             ).fetchone()
-            canonical, existing_blob, merge_count = row
-            merged_vector = merge_vectors(_vector_from_blob(existing_blob), vector, merge_count)
-            canonical = cleaned if len(cleaned) > len(str(canonical or "")) else canonical
-            conn.execute(
-                "UPDATE concepts SET canonical=?, vector=?, specificity=?, merge_count=? WHERE id=?",
-                (
-                    canonical,
-                    _vector_blob(merged_vector),
-                    vector_specificity(merged_vector),
-                    int(merge_count) + 1,
-                    idx,
-                ),
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO concept_aliases(normalized, concept_id) VALUES(?, ?)",
-                (normalized, idx),
-            )
-            _store_concept_terms(conn, idx, canonical, cleaned)
-            _clear_read_caches()
+            if existing is not None:
+                preferred = _prefer_canonical(existing[0], cleaned)
+                if preferred != existing[0]:
+                    with conn:
+                        conn.execute(
+                            "UPDATE concepts SET canonical=? WHERE id=?",
+                            (preferred, idx),
+                        )
+                        _store_concept_terms(conn, idx, preferred, cleaned)
+                    _clear_read_caches()
             return idx
 
-        next_id = conn.execute("SELECT COALESCE(MAX(id), -1) + 1 FROM concepts").fetchone()[0]
-        conn.execute(
-            "INSERT INTO concepts(id, canonical, vector, specificity, merge_count) VALUES(?, ?, ?, ?, 1)",
-            (int(next_id), cleaned, _vector_blob(vector), vector_specificity(vector)),
-        )
-        conn.execute(
-            "INSERT INTO concept_aliases(normalized, concept_id) VALUES(?, ?)",
-            (normalized, int(next_id)),
-        )
-        _store_concept_terms(conn, next_id, cleaned)
+        with conn:
+            _ensure_vector_dimension(conn, len(vector))
+            match = _best_concept_match(conn, vector, cleaned)
+            if match and match["similarity"] >= match["threshold"]:
+                idx = int(match["index"])
+                row = conn.execute(
+                    "SELECT canonical, vector, merge_count FROM concepts WHERE id=?",
+                    (idx,),
+                ).fetchone()
+                canonical, existing_blob, merge_count = row
+                merged_vector = merge_vectors(_vector_from_blob(existing_blob), vector, merge_count)
+                canonical = _prefer_canonical(canonical, cleaned)
+                conn.execute(
+                    "UPDATE concepts SET canonical=?, vector=?, specificity=?, merge_count=? WHERE id=?",
+                    (
+                        canonical,
+                        _vector_blob(merged_vector),
+                        vector_specificity(merged_vector),
+                        int(merge_count) + 1,
+                        idx,
+                    ),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO concept_aliases(normalized, concept_id) VALUES(?, ?)",
+                    (normalized, idx),
+                )
+                _store_concept_terms(conn, idx, canonical, cleaned)
+                _clear_read_caches()
+                return idx
+
+            cursor = conn.execute(
+                "INSERT INTO concepts(canonical, vector, specificity, merge_count) VALUES(?, ?, ?, 1)",
+                (cleaned, _vector_blob(vector), vector_specificity(vector)),
+            )
+            concept_id = int(cursor.lastrowid)
+            conn.execute(
+                "INSERT OR IGNORE INTO concept_aliases(normalized, concept_id) VALUES(?, ?)",
+                (normalized, concept_id),
+            )
+            row = conn.execute(
+                "SELECT concept_id FROM concept_aliases WHERE normalized=?",
+                (normalized,),
+            ).fetchone()
+            idx = int(row[0]) if row is not None else concept_id
+            _store_concept_terms(conn, idx, cleaned)
     _clear_read_caches()
-    return int(next_id)
+    return int(idx)
 
 
 get_index = get_or_create_index

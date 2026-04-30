@@ -4,8 +4,13 @@ import sys
 import time
 import threading
 import subprocess
+from pathlib import Path
 from dotenv import load_dotenv # type: ignore
-load_dotenv()
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+load_dotenv(PROJECT_ROOT / ".env")
 
 from constants import (
     AGENT_POSITION_RECORD_BYTES,
@@ -14,6 +19,7 @@ from constants import (
     CONNECTION_RECORD_SIZE,
     DASHBOARD_PORT,
     DASHBOARD_URL,
+    EXTRACTION_THREADS,
     MAX_AGENTS,
     MAX_CONNECTIONS,
     PHASE_IDLE,
@@ -39,17 +45,47 @@ def launch_webapp(names_dict): # Launches clean web UI (localhost:8000)
     env["SHM_STATUS"]      = names_dict["status"]
     env["SHM_COMMAND"]     = names_dict["command"]
     env["SHM_REPORT"]      = names_dict["report"]
-    cmd = [sys.executable, "frontend/ui.py"]
-    return subprocess.Popen(cmd, env=env) # opens
+    cmd = [sys.executable, str(PROJECT_ROOT / "frontend" / "ui.py")]
+    return subprocess.Popen(cmd, env=env, cwd=PROJECT_ROOT) # opens
 
 def launch_physics(names_dict): # calls c++ to launch physics
-    physics_binary = "./physics_engine"
+    physics_binary = PROJECT_ROOT / "physics_engine"
     print(f"[SYSTEM] Launching C++ Physics Engine ({os.path.basename(physics_binary)})")
     env = os.environ.copy()
     env["SHM_POS"]         = names_dict["pos"]
     env["SHM_CONNECTIONS"] = names_dict["connections"]
     env["SHM_STATUS"]      = names_dict["status"]
-    return subprocess.Popen([physics_binary], env=env) # opens
+    return subprocess.Popen([str(physics_binary)], env=env, cwd=PROJECT_ROOT) # opens
+
+def prune_after_physics(runtime_api):
+    print("[SYSTEM] Pruning active connector subgraph after physics...")
+    subgraph_summary = runtime_api.prepare_active_subgraph()
+    if not subgraph_summary:
+        return
+    print(
+        "[SYSTEM] Active connector subgraph: "
+        f"{subgraph_summary['kept_connections']} connections, "
+        f"{subgraph_summary['kept_nodes']} nodes, "
+        f"start anchors {subgraph_summary['active_seed_count']}/{subgraph_summary['seed_count']}, "
+        f"goal anchors {subgraph_summary['active_goal_count']}/{subgraph_summary['goal_count']}."
+    )
+    for route in subgraph_summary.get("routes", []):
+        print(
+            "[SYSTEM] Route "
+            f"{route.get('route', '?')}: "
+            f"{route.get('seed_count', 0)} starts, "
+            f"{route.get('goal_count', 0)} goals, "
+            f"{route.get('core_connections', 0)} core connections."
+        )
+    for item in subgraph_summary.get("anchor_pair_diagnostics", [])[:8]:
+        status = "selected" if item.get("selected") else "rejected"
+        print(
+            "[SYSTEM] Anchor pair "
+            f"{status}: A='{item.get('a', '')}' B='{item.get('b', '')}' "
+            f"A->B edges={item.get('a_to_b_edges', 0)} "
+            f"B->A edges={item.get('b_to_a_edges', 0)} "
+            f"sources={item.get('sources', 0)}."
+        )
 
 def manage_shm(): 
     # pos_shm: agent positions, connection_shm: connection data, command_shm: prompt payload, status_shm: status, report_shm: reports
@@ -89,6 +125,7 @@ def manage_shm():
 def main():
     runtime_api = None
     scrapers = []
+    extractors = []
     brain_thread = None
     server_proc = None
     physics_proc = None
@@ -97,11 +134,10 @@ def main():
     status_shm = shm_handles["status"]
     report_shm = shm_handles["report"]
 
-    scrape_queue  = mp.Queue() # distributes scrape workers to separate threads
+    scrape_queue  = mp.Queue() # distributes scrape workers to separate processes
+    extract_queue = mp.Queue()
     asu_queue     = mp.Queue()
     stop_event    = mp.Event()
-    manager       = mp.Manager()
-    shared_cache  = manager.dict()
     sync_counter  = mp.Value('i', 0)
     ingest_counter = mp.Value('i', 0)
 
@@ -111,14 +147,25 @@ def main():
         zero_ticks         = 0  # consecutive ticks where sync_counter == 0 and queue empty
 
         from d_scrape_worker import scrape_worker_loop
+        from d_extraction_worker import extraction_worker_loop
         import runtime as runtime_api
 
         # ------------ THREAD SETUP ------------
         for i in range(SCRAPE_THREADS): # launch 8 scrape workers
             p = mp.Process(target=scrape_worker_loop, # calls scraper_worker.py for each thread
-                args=(scrape_queue, asu_queue, stop_event, shared_cache, sync_counter), name=f"Worker_{i}", daemon=True)
+                args=(scrape_queue, extract_queue, stop_event, sync_counter), name=f"ScrapeWorker_{i}", daemon=True)
             p.start()
             scrapers.append(p)
+
+        for i in range(EXTRACTION_THREADS):
+            p = mp.Process(
+                target=extraction_worker_loop,
+                args=(extract_queue, asu_queue, stop_event),
+                name=f"ExtractWorker_{i}",
+                daemon=True,
+            )
+            p.start()
+            extractors.append(p)
 
         brain_thread = threading.Thread(
             target=runtime_api.run_brain, # brain now lives in the main process instead of its own child process
@@ -143,11 +190,15 @@ def main():
                 if quiet: # checks if agents are done processing and query list is empty
                     zero_ticks += 1
                     if zero_ticks >= 3: # ensures that it stays in research mode for at least 3 ticks to prevent race conditions
+                        if runtime_api.queue_refinement_scrapes(scrape_queue, sync_counter, ingest_counter):
+                            zero_ticks = 0
+                            continue
                         print("[SYSTEM] Research complete. Launching physics simulation...")
                         status_shm.buf[0] = PHASE_PHYSICS
                         physics_proc = launch_physics(shm_names)
                         if physics_proc is None:
-                            print("[SYSTEM] Physics skipped. Marking graph as stable.")
+                            print("[SYSTEM] Physics skipped. Pruning graph before marking stable.")
+                            prune_after_physics(runtime_api)
                             status_shm.buf[0] = PHASE_STABLE
                         zero_ticks = 0
                 else: zero_ticks = 0
@@ -156,9 +207,11 @@ def main():
             if physics_proc and physics_proc.poll() is not None: # checks if physics engine is done
                 if physics_proc.returncode == 0:
                     print("[SYSTEM] Physics stabilized.")
+                    prune_after_physics(runtime_api)
                     status_shm.buf[0] = PHASE_STABLE # updates phase, will be read by synthesis.py
                 elif physics_proc.returncode == 2:
                     print("[SYSTEM] Physics reached its time limit without stabilizing. Proceeding with the current layout.")
+                    prune_after_physics(runtime_api)
                     status_shm.buf[0] = PHASE_STABLE
                 else:
                     error = f"[error] Physics engine failed with exit code {physics_proc.returncode}."
@@ -206,6 +259,8 @@ def main():
             runtime_api.stop_thought_workers()
         for p in scrapers:
             p.terminate()
+        for p in extractors:
+            p.terminate()
         if server_proc:
             server_proc.terminate()
         if physics_proc:
@@ -216,7 +271,8 @@ def main():
             try:
                 shm.close()
                 shm.unlink()
-            except: pass # ignores errors during cleanup
+            except (BufferError, FileNotFoundError, OSError):
+                pass
         print("[SYSTEM] Engine offline.")
 
 if __name__ == "__main__": # entry point for program, just runs main()
