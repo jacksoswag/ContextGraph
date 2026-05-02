@@ -1,20 +1,25 @@
 import re; from collections import OrderedDict; from functools import lru_cache; from u_language_constants import (AUXILIARY_TOKENS, FUTURE_TENSE_CUES, PAST_TENSE_CUES, RELATION_WORD_DERIVATIONAL_SUFFIXES, RELATION_WORD_S_EXCLUSION_SUFFIXES, RELATION_WORD_STRONG_SUFFIXES, STOPWORD_TOKENS, SUBORDINATE_CLAUSE_TOKENS)
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)?"); DOC_CACHE_LIMIT = 8192; _DOC_CACHE = OrderedDict(); FUTURE_TENSE_RE = re.compile(r"\b(?:%s)\b" % "|".join(re.escape(value).replace(r"\ ", r"\s+") for value in FUTURE_TENSE_CUES), re.IGNORECASE)
 PAST_TENSE_RE = re.compile(r"\b(?:%s)\b" % "|".join(re.escape(value).replace(r"\ ", r"\s+") for value in PAST_TENSE_CUES), re.IGNORECASE)
+
 # Returns token words for linguistic role parsing.
 def token_words(text):
     return [token.lower() for token in TOKEN_RE.findall(str(text or ""))]
+
 # Lazily loads spaCy when available; returns None when dependency setup is absent.
 @lru_cache(maxsize=1)
 def _nlp():
     try:
-        import spacy  # type: ignore
+        import spacy  
+# type: ignore
         return spacy.load("en_core_web_sm", disable=["ner"])
     except Exception: return None
+
 # Stores remember doc for linguistic role parsing.
 def _remember_doc(text, doc):
     _DOC_CACHE[text] = doc; _DOC_CACHE.move_to_end(text)
     while len(_DOC_CACHE) > DOC_CACHE_LIMIT: _DOC_CACHE.popitem(last=False)
+
 # Returns a cached spaCy doc for text or None when parsing is unavailable.
 def _doc(text):
     text = " ".join(str(text or "").strip().split())
@@ -27,6 +32,7 @@ def _doc(text):
         doc = nlp(text); _remember_doc(text, doc)
         return doc
     except Exception: return None
+
 # Returns preparse texts for linguistic role parsing.
 def preparse_texts(texts):
     nlp = _nlp()
@@ -41,16 +47,19 @@ def preparse_texts(texts):
         for clean, doc in zip(missing, nlp.pipe(missing)): _remember_doc(clean, doc)
     except Exception:
         for clean in missing: _doc(clean)
+
 # Returns subtree text for linguistic role parsing.
 def _subtree_text(doc, token):
     indices = [item.i for item in token.subtree if not item.is_punct]
     if not indices: return token.text
     return doc[min(indices) : max(indices) + 1].text.strip(" ,:")
+
 # Returns first subject for linguistic role parsing.
 def _first_subject(root):
     for child in root.children:
         if child.dep_ in {"nsubj", "nsubjpass", "csubj", "csubjpass"}: return child
     return None
+
 # Returns first predicate for linguistic role parsing.
 def _first_predicate(root):
     preferred = {"attr", "acomp", "dobj", "dative", "npadvmod", "obj", "oprd", "obl"}
@@ -62,11 +71,13 @@ def _first_predicate(root):
                 if grandchild.dep_ in {"pobj", "obj"}: return grandchild
             return child
     return None
+
 # Returns root token for linguistic role parsing.
 def _root_token(doc):
     roots = [token for token in doc if token.dep_ == "ROOT"]
     for token in roots: return token
     return roots[0] if roots else None
+
 # Returns embedded statement text for linguistic role parsing.
 def embedded_statement_text(text):
     """Return a subordinate statement when a wrapper clause embeds one."""
@@ -79,6 +90,7 @@ def embedded_statement_text(text):
         if any(item.dep_ in {"nsubj", "nsubjpass", "csubj"} for item in child.subtree):
             return _subtree_text(doc, child)
     return ""
+
 # Returns dependency relation for linguistic role parsing.
 def dependency_relation(text):
     """Extract a grammar-root relation without relying on enumerated verbs."""
@@ -90,6 +102,7 @@ def dependency_relation(text):
     if subject is None or predicate is None: return None
     relation = root.lemma_.lower() if root.lemma_ and root.lemma_ != "-PRON-" else root.text.lower()
     return {"subject_raw": _subtree_text(doc, subject), "relation": relation, "predicate_raw": _subtree_text(doc, predicate)}
+
 # Returns relation word score for linguistic role parsing.
 def relation_word_score(token):
     """Morphology score used when the parser cannot find a relation."""
@@ -102,9 +115,11 @@ def relation_word_score(token):
     if word.endswith(RELATION_WORD_DERIVATIONAL_SUFFIXES) and len(word) > 5: return 0.8
     if word.endswith("s") and len(word) > 4 and not word.endswith(RELATION_WORD_S_EXCLUSION_SUFFIXES): return 0.65
     return 0.0
+
 # Returns whether text looks like relation word.
 def looks_like_relation_word(token):
     return relation_word_score(token) > 0.0
+
 # Returns parsed tense for linguistic role parsing.
 def parsed_tense(text, relation=""):
     doc = _doc(text)
@@ -120,6 +135,7 @@ def parsed_tense(text, relation=""):
     if FUTURE_TENSE_RE.search(lower): return "future"
     if PAST_TENSE_RE.search(lower) or relation.lower().endswith("ed"): return "past"
     return "present"
+
 # Returns whether text looks like clause.
 def looks_like_clause(text):
     tokens = token_words(text)
@@ -131,6 +147,7 @@ def looks_like_clause(text):
     token_set = set(tokens)
     if len(tokens) >= 4 and token_set & AUXILIARY_TOKENS: return True
     return bool((token_set & SUBORDINATE_CLAUSE_TOKENS) and (token_set & AUXILIARY_TOKENS))
+
 # Returns whether text looks like imperative.
 def looks_like_imperative(text):
     tokens = token_words(text)

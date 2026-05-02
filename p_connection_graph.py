@@ -183,7 +183,7 @@ def _resolve_relation_id(rel_type=None):
     if rel_type is not None:
         return int(rel_type)
     return -1
-# Adds or merges one connection into Brain state and the shared-memory connection buffer.
+# Adds or merges one connection into graph state and the shared-memory connection buffer.
 def add_connection(brain, s_name, o_name, rel_type=None, source="unknown", subject_sp=None, predicate_sp=None, subject_specifics=None, predicate_specifics=None, connection_specifics=None, evidence_text="", previous_agent_name=None, previous_agent_ids=None, create_agents=True,):
     s_name = clean_agent_name(s_name); o_name = clean_agent_name(o_name); evidence_text = clean_clause_text(evidence_text, subject=s_name, predicate=o_name)
     if not is_usable_agent_text(s_name) or not is_usable_agent_text(o_name):

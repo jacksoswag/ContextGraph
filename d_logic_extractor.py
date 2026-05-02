@@ -16,7 +16,7 @@ QUANTIFIER_EXCLUSION_RE = re.compile(rf"^(?:{_phrase_pattern(QUANTIFIER_EXCLUSIO
     for quantifier, phrases in QUANTIFIER_RULES
 ); PERCENT_QUANTIFIER_RE = re.compile(rf"^(?P<qualifier>{_phrase_pattern(PERCENT_QUANTIFIER_QUALIFIERS)})?\s*(?P<value>\d+(?:\.\d+)?)\s*(?:{_phrase_pattern(PERCENT_TOKENS)})\s+(?:of\b)?", re.IGNORECASE)
 LEADING_MODIFIER_RE = re.compile(rf"^(?P<modifier>{MODIFIER_CUE_RE.pattern}[^,;]{{0,120}})[,;]\s*(?P<core>.+)$", re.IGNORECASE)
-TRAILING_MODIFIER_RE = re.compile(rf"^(?P<core>.+?)\s+(?P<modifier>{MODIFIER_CUE_RE.pattern}\s+.+)$", re.IGNORECASE); LEADING_PARTICIPIAL_MODIFIER_RE = re.compile(rf"^(?P<modifier>[A-Za-z]+ing\s+(?:{_phrase_pattern(PARTICIPIAL_MODIFIER_CUES)}))\s+(?P<core>.+)$", re.IGNORECASE); EXTRACTION_CACHE_VERSION = "logic-extractor-v14"
+TRAILING_MODIFIER_RE = re.compile(rf"^(?P<core>.+?)\s+(?P<modifier>{MODIFIER_CUE_RE.pattern}\s+.+)$", re.IGNORECASE); LEADING_PARTICIPIAL_MODIFIER_RE = re.compile(rf"^(?P<modifier>[A-Za-z]+ing\s+(?:{_phrase_pattern(PARTICIPIAL_MODIFIER_CUES)}))\s+(?P<core>.+)$", re.IGNORECASE); EXTRACTION_CACHE_VERSION = "logic-extractor-v15"
 _EXTRACTION_CACHE_LOCK = threading.RLock(); _EXTRACTION_CACHE_CONNECTIONS = {}
 # Opens the SQLite extraction cache for block-level reuse.
 def _cache_connection():

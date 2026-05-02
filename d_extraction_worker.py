@@ -1,6 +1,7 @@
 import time; from queue import Empty; from u_constants import EXTRACTION_BLOCK_LIMIT, MAX_CONNECTIONS_PER_QUERY; from d_logic_extractor import find_connections
+
 # Main thread manager for clause, logic, and connection extraction
-# Consumes scraped blocks, extracts connection records, and publishes them to the Brain queue.
+# Consumes scraped blocks, extracts connection records, and publishes them to the graph queue.
 def extraction_worker_loop(extract_queue, asu_queue, stop_event):
     while not stop_event.is_set():
         try: task = extract_queue.get(timeout=0.2)

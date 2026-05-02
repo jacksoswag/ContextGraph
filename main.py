@@ -85,7 +85,7 @@ def manage_shm(): # pos_shm: agent positions, connection_shm: connection data, c
 # Bootstraps workers, dashboard, physics, thinking, and synthesis phases for one engine session.
 def main():
     os.environ["PYTHONUNBUFFERED"] = "1"; log_tee = StartupLogTee(_startup_log_path()); log_path = log_tee.start(); os.environ["BRAIN_LOG_PATH"] = str(log_path); print(f"[SYSTEM] Logging debug output to {log_path}")
-    runtime_api, brain_thread, server_proc, physics_proc = None, None, None, None; scrapers, extractors = [], []
+    runtime_api, engine_thread, server_proc, physics_proc = None, None, None, None; scrapers, extractors = [], []
     shm_names, shm_handles = manage_shm() # initializes and returns shared memory
     status_shm, report_shm = shm_handles["status"],shm_handles["report"]
     scrape_queue, extract_queue, asu_queue = mp.Queue(), mp.Queue(), mp.Queue()  # distributes workers to separate processes
@@ -102,7 +102,7 @@ def main():
             p.start(); scrapers.append(p)
         for i in range(EXTRACTION_THREADS):
             p = mp.Process(target=extraction_worker_loop, args=(extract_queue, asu_queue, stop_event), name=f"ExtractWorker_{i}", daemon=True); p.start(); extractors.append(p)
-        brain_thread = threading.Thread(target=runtime_api.run_brain, args=(scrape_queue, asu_queue, stop_event, shm_names, sync_counter, ingest_counter), name="brain", daemon=True); brain_thread.start(); print("[SYSTEM] Engine idle. Awaiting prompts.")
+        engine_thread = threading.Thread(target=runtime_api.run_engine, args=(scrape_queue, asu_queue, stop_event, shm_names, sync_counter, ingest_counter), name="di-engine", daemon=True); engine_thread.start(); print("[SYSTEM] Engine idle. Awaiting prompts.")
         # ------------ MAIN LOOP ------------
         while not stop_event.is_set(): # continues if program is still running
             time.sleep(1)
@@ -139,10 +139,10 @@ def main():
             if current_status == PHASE_STABLE:
                 print("[SYSTEM] Graph stabilized. Starting Thought Processes..."); status_shm.buf[0] = PHASE_THINKING
                 if runtime_api.launch_thought_workers(stop_event): print("[SYSTEM] Thought workers launched.")
-                else: print("[SYSTEM] Brain is not ready to launch thought workers yet.")
+                else: print("[SYSTEM] Decentralized Intelligence is not ready to launch thought workers yet.")
             # Thinking -> Synthesis (Moving from analysis to report writing)
             if current_status == PHASE_THINKING:
-                if not brain_thread.is_alive(): raise RuntimeError("Brain thread terminated during thought processing.")
+                if not engine_thread.is_alive(): raise RuntimeError("Decentralized Intelligence thread terminated during thought processing.")
                 if runtime_api.thought_workers_finished():
                     stats = runtime_api.thought_worker_stats(); print(f"[SYSTEM] Thought workers finished: {stats['endpoint']} at endpoints / {stats['dead']} dead / "
                         f"{stats.get('max_hops', 0)} max hops / {stats['successful']} successful.")
@@ -167,7 +167,7 @@ def main():
                 proc.kill()
                 try: proc.wait(timeout=1.0)
                 except subprocess.TimeoutExpired: pass
-        if brain_thread and brain_thread.is_alive(): brain_thread.join(timeout=2.0)
+        if engine_thread and engine_thread.is_alive(): engine_thread.join(timeout=2.0)
         for shm in shm_handles.values(): # closes and removes shared memory segments
             try: shm.close(); shm.unlink()
             except (BufferError, FileNotFoundError, OSError): pass # ensures no crash on cleanup

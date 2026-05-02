@@ -25,7 +25,7 @@ const float BOUNDS_PER_SQRT_AGENT = 30.0f;
 const float SOFT_BOUND_FORCE = 0.0018f;
 const int MAX_SIMULATION_SECONDS = 22;
 // STABILITY PARAMETERS
-const float STABILITY_THRESHOLD = 0.015f; // Energy threshold for "stable"
+const float STABILITY_THRESHOLD = 0.02f; // Energy threshold for "stable"
 const int STABILITY_REQUIRED_FRAMES =
     90; // Must be stable for 1.5 seconds (at 60fps)
 // PHASE CONSTANTS (Must match u_constants.py)

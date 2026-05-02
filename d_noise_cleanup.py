@@ -1,6 +1,7 @@
 import copy, re
 from u_language_constants import (AMOUNT_ENDPOINT_PHRASES,AMOUNT_UNIT_PATTERNS,AUXILIARY_TOKENS,CONTRACTION_FRAGMENT_TOKENS,CONTRACTION_PRONOUN_BASES,CONTRACTION_SUFFIXES,COORDINATOR_TOKENS,DISCOURSE_MARKER_TOKENS,GENERIC_REFERENTS,LEADING_DISCOURSE_MARKERS,LEADING_FILLER_TOKENS,LINKING_RELATION_TOKENS,NAVIGATION_TRAILING_PHRASES,PAREN_SOURCE_LABEL_PATTERNS,STOPWORD_TOKENS,SUBORDINATE_CLAUSE_TOKENS,TEMPORAL_ONLY_TOKENS,TITLE_SECTION_NUMBER_WORDS,TITLE_SECTION_WORDS,TRAILING_DISCOURSE_MARKERS,WEAK_AGENT_TOKENS,WHOLE_PHRASE_REJECT_STARTS)
 from d_linguistic_roles import (looks_like_clause, looks_like_imperative); from o_connection import ConnectionEndpoint
+
 # Builds phrase pattern for text cleanup.
 def _phrase_pattern(values): return "|".join(re.escape(value).replace(r"\ ", r"\s+") for value in sorted(values, key=len, reverse=True))
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE); HTML_RE = re.compile(r"<[^>]+>"); BRACKET_CITATION_RE = re.compile(r"\[(?:\d+|citation needed|edit|note \d+)\]", re.IGNORECASE); PAREN_SOURCE_RE = re.compile(rf"\((?:{'|'.join(PAREN_SOURCE_LABEL_PATTERNS)})\)", re.IGNORECASE)
@@ -8,29 +9,36 @@ NAVIGATION_TRAILING_RE = re.compile(rf"[\s.·|]*(?:{_phrase_pattern(NAVIGATION_T
 COORDINATOR_RE = re.compile(rf"\s*(?:;|,\s*(?:{_phrase_pattern(COORDINATOR_TOKENS)})\s+|,\s*|\s+\b(?:{_phrase_pattern(COORDINATOR_TOKENS)})\b\s+)\s*", re.IGNORECASE); SPECIFIC_NUMBER_RE = re.compile(rf"(?:\$|€|£)?\b\d[\d,]*(?:\.\d+)?(?:\s?(?:{_phrase_pattern(AMOUNT_UNIT_PATTERNS)}))?(?=\W|$)",re.IGNORECASE,)
 LEADING_FILLER_RE = re.compile(rf"^(?:{_phrase_pattern(LEADING_FILLER_TOKENS)})\s+", re.IGNORECASE); LEADING_DISCOURSE_RE = re.compile(rf"^(?:{_phrase_pattern(LEADING_DISCOURSE_MARKERS)})\b[\s,:.-]*", re.IGNORECASE,); TRAILING_DISCOURSE_RE = re.compile(rf"\s+(?:{_phrase_pattern(TRAILING_DISCOURSE_MARKERS)})\b[\s,:.-]*$",re.IGNORECASE)
 TITLE_SECTION_RE = re.compile(rf"^(?:{_phrase_pattern(TITLE_SECTION_WORDS)})\s+(?:\d+|{_phrase_pattern(TITLE_SECTION_NUMBER_WORDS)})\b[\s:.-]*",re.IGNORECASE,); MAX_AGENT_CHARS = 72; MAX_AGENT_TOKENS = 8; MAX_CLAUSE_CHARS = 360; MAX_COORDINATED_PARTS = 4; MAX_CONNECTION_EXPANSIONS = 8
+
 # Normalizes text for text cleanup.
 def _normalize_text(text, strip_urls=True):
     text = str(text or ""); text = text.replace("\u2018", "'").replace("\u2019", "'"); text = text.replace("\u201c", '"').replace("\u201d", '"'); text = text.replace("\u2013", "-").replace("\u2014", "-"); text = HTML_RE.sub(" ", text)
     if strip_urls: text = URL_RE.sub(" ", text)
     text = BRACKET_CITATION_RE.sub(" ", text); text = PAREN_SOURCE_RE.sub(" ", text); text = NAVIGATION_TRAILING_RE.sub(" ", text); text = re.sub(r"\\[a-zA-Z]+\{[^}]*\}", " ", text); text = re.sub(r"[_*`~]+", " ", text); text = re.sub(r"\s+", " ", text)
     return text
+
 # Cleans text for text cleanup.
 def clean_text(text):
     text = _normalize_text(text, strip_urls=True); text = re.sub(r"\s*-\s*", " ", text)
     return text.strip(" \t\r\n\"'.,:|")
+
 # Cleans source text for text cleanup.
 def clean_source_text(text):
     text = _normalize_text(text, strip_urls=False)
     return text.strip(" \t\r\n\"'.,:")
+
 # Returns agent tokens for text cleanup.
 def _agent_tokens(text):
     return [token.lower() for token in TOKEN_RE.findall(str(text or ""))]
+
 # Returns whether the input has contraction pronoun.
 def has_contraction_pronoun(text):
     return bool(CONTRACTION_PRONOUN_RE.search(str(text or "")))
+
 # Returns content tokens for text cleanup.
 def _content_tokens(text):
     return [token for token in _agent_tokens(text) if token not in STOPWORD_TOKENS and token not in DISCOURSE_MARKER_TOKENS and token not in WEAK_AGENT_TOKENS]
+
 # Cleans strip leading noise for text cleanup.
 def _strip_leading_noise(text):
     clean = text
@@ -38,6 +46,7 @@ def _strip_leading_noise(text):
         previous = clean; clean = LEADING_FILLER_RE.sub("", clean).strip(); clean = LEADING_DISCOURSE_RE.sub("", clean).strip(); clean = TITLE_SECTION_RE.sub("", clean).strip()
         if clean == previous: break
     return clean
+
 # Cleans collapse repeated title for text cleanup.
 def _collapse_repeated_title(text):
     clean = text.strip()
@@ -51,11 +60,13 @@ def _collapse_repeated_title(text):
         if best_tokens and set(candidate_tokens) <= set(best_tokens) and len(candidate) < len(best):
             best = candidate; best_tokens = candidate_tokens
     return best
+
 # Cleans collapse repeated word runs for text cleanup.
 def _collapse_repeated_word_runs(text):
     words = str(text or "").split()
     if len(words) < 2: return str(text or "").strip()
-    # Builds a sortable key for repeated title collapse candidates.
+    
+# Builds a sortable key for repeated title collapse candidates.
     def key(word): return re.sub(r"[^a-z0-9]+", "", word.lower())
     changed = True
     while changed:
@@ -71,13 +82,16 @@ def _collapse_repeated_word_runs(text):
             words = next_words
             if changed: break
     return " ".join(words).strip()
+
 # Cleans agent name for text cleanup.
 def clean_agent_name(text):
     clean = clean_text(text); clean = _collapse_repeated_title(clean); clean = _strip_leading_noise(clean); clean = LEADING_FILLER_RE.sub("", clean).strip(); clean = TRAILING_DISCOURSE_RE.sub("", clean).strip(); clean = re.sub(r"\s*[\[(][^\])]*$", "", clean).strip(); clean = _collapse_repeated_word_runs(clean); clean = re.sub(r"\s+", " ", clean)
     return clean[:MAX_AGENT_CHARS].strip()
+
 # Returns meaningful tokens for text cleanup.
 def _meaningful_tokens(text):
     return [token.lower() for token in TOKEN_RE.findall(str(text or "")) if token and token.lower() not in STOPWORD_TOKENS]
+
 # Returns whether the input is usable agent text.
 def is_usable_agent_text(text):
     original_tokens = _agent_tokens(text)
@@ -107,6 +121,7 @@ def is_usable_agent_text(text):
     if alpha_chars < 2: return False
     non_word_chars = sum(1 for char in clean if not (char.isalnum() or char.isspace() or char in "'&./"))
     return non_word_chars <= max(2, len(clean) // 8)
+
 # Returns whether the input is usable relation text.
 def is_usable_relation_text(text):
     clean = clean_text(text).lower()
@@ -119,6 +134,7 @@ def is_usable_relation_text(text):
     if tokens[0] in GENERIC_REFERENTS or tokens[-1] in GENERIC_REFERENTS: return False
     if any(token in CONTRACTION_FRAGMENT_TOKENS for token in tokens) and not set(tokens) & LINKING_RELATION_TOKENS: return False
     return True
+
 # Returns whether the input is clause like agent text.
 def is_clause_like_agent_text(text):
     clean = clean_agent_name(text); tokens = _agent_tokens(clean)
@@ -129,6 +145,7 @@ def is_clause_like_agent_text(text):
     if token_set & SUBORDINATE_CLAUSE_TOKENS and token_set & AUXILIARY_TOKENS: return True
     if tokens[0] in WEAK_AGENT_TOKENS and token_set & AUXILIARY_TOKENS: return True
     return False
+
 # Returns whether text looks like title or list noise.
 def _looks_like_title_or_list_noise(text):
     clean = clean_text(text); tokens = TOKEN_RE.findall(clean)
@@ -138,6 +155,7 @@ def _looks_like_title_or_list_noise(text):
     if number_count >= 4 and titleish_count >= max(5, len(alpha_tokens) // 3) and not has_sentence_verb: return True
     if number_count >= 6 and punctuation_count <= 2 and not has_clause_marker: return True
     return False
+
 # Returns whether the input is usable clause text.
 def is_usable_clause_text(text):
     clean = clean_clause_text(text)
@@ -149,6 +167,7 @@ def is_usable_clause_text(text):
     content_tokens = _content_tokens(clean)
     if not content_tokens: return False
     return True
+
 # Cleans clause text for text cleanup.
 def clean_clause_text(text, subject="", predicate=""):
     clean = clean_text(text)
@@ -160,6 +179,7 @@ def clean_clause_text(text, subject="", predicate=""):
     if not clean: return ""
     if clean[-1] not in ".!?": clean += "."
     return clean
+
 # Splits coordinated phrase into usable parts.
 def split_coordinated_phrase(text):
     clean = clean_agent_name(text)
@@ -171,6 +191,7 @@ def split_coordinated_phrase(text):
         seen.add(key); usable.append(part)
         if len(usable) >= MAX_COORDINATED_PARTS: break
     return usable or ([clean] if is_usable_agent_text(clean) else [])
+
 # Cleans specific value for text cleanup.
 def _clean_specific_value(value):
     if isinstance(value, dict):
@@ -189,6 +210,7 @@ def _clean_specific_value(value):
     if has_contraction_pronoun(clean): return None
     if len(clean) > MAX_CLAUSE_CHARS: clean = clean[:MAX_CLAUSE_CHARS].strip()
     return clean
+
 # Cleans specifics for text cleanup.
 def clean_specifics(values):
     cleaned = []; seen = set()
@@ -199,9 +221,11 @@ def clean_specifics(values):
         if key in seen: continue
         seen.add(key); cleaned.append(item)
     return cleaned
+
 # Cleans endpoint for text cleanup.
 def _clean_endpoint(endpoint, text):
     return ConnectionEndpoint(quantifier=getattr(endpoint, "quantifier", -1), tense=getattr(endpoint, "tense", -1), truth=getattr(endpoint, "truth", -1), ASU_idx=text, modifier_idx=getattr(endpoint, "modifier_idx", ()))
+
 # Builds expand clean connection record for text cleanup.
 def expand_clean_connection_record(record):
     subject_sp = (record or {}).get("subject"); predicate_sp = (record or {}).get("predicate"); relation_id = (record or {}).get("connection")

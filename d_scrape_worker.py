@@ -1,14 +1,17 @@
 import json, os, sqlite3, time; from pathlib import Path; from queue import Empty; from urllib.parse import urlparse; import requests, trafilatura; from dotenv import load_dotenv; from u_constants import MAX_CHARS_PER_BLOCK,MIN_EXTRACTABLE_BLOCK_CHARS,SCRAPE_CACHE_PATH,SCRAPE_DEFAULT_LIMIT,SERPER_PAGE_TIMEOUT,SERPER_RESULT_TIMEOUT
-from d_noise_cleanup import clean_text; load_dotenv(Path(os.environ.get("BRAIN_ENV_PATH") or Path(__file__).resolve().parent / ".env")); WIKIPEDIA_OPENSEARCH_URL = "https://en.wikipedia.org/w/api.php"; SERPER_URL = "https://google.serper.dev/search"; CACHE_PATH = SCRAPE_CACHE_PATH; HEADERS = {"User-Agent": "brain-research/1.0 (+https://localhost)"}
+from d_noise_cleanup import clean_text; load_dotenv(Path(os.environ.get("BRAIN_ENV_PATH") or Path(__file__).resolve().parent / ".env")); WIKIPEDIA_OPENSEARCH_URL = "https://en.wikipedia.org/w/api.php"; SERPER_URL = "https://google.serper.dev/search"; CACHE_PATH = SCRAPE_CACHE_PATH; HEADERS = {"User-Agent": "decentralized-intelligence/1.0 (+https://localhost)"}
+
 # Cleans url for scraping.
 def _clean_url(url):
     url = str(url or "").strip().strip("\"'<>[]()"); parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc: return ""
     return url
+
 # Builds result tag for scraping.
 def _result_tag(title="", url=""):
     title = clean_text(title); url = _clean_url(url)
     return f"{title}|{url}" if title and url else url or title or "unknown"
+
 # Opens the SQLite scrape cache and ensures its table exists.
 def _cache_connection():
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True); conn = sqlite3.connect(CACHE_PATH, timeout=30); conn.execute("PRAGMA journal_mode=WAL")
@@ -17,9 +20,11 @@ def _cache_connection():
             namespace TEXT NOT NULL, cache_key TEXT NOT NULL, value TEXT NOT NULL, created REAL NOT NULL,
             PRIMARY KEY(namespace, cache_key))""")
     return conn
+
 # Serializes a request payload into a stable scrape-cache key.
 def _cache_key(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
 # Reads a cached scrape value by namespace and key.
 def _cache_get(namespace, key):
     conn = None
@@ -31,6 +36,7 @@ def _cache_get(namespace, key):
     if row is None: return None
     try: return json.loads(row[0])
     except json.JSONDecodeError: return None
+
 # Stores a scrape value by namespace and key.
 def _cache_set(namespace, key, value):
     conn = None
@@ -41,6 +47,7 @@ def _cache_set(namespace, key, value):
     except (TypeError, sqlite3.Error): return
     finally:
         if conn is not None: conn.close()
+
 # Returns serper page for scraping.
 def _serper_page(query, page, page_size):
     key = _cache_key({"query": query, "page": int(page), "page_size": int(page_size)}); cached = _cache_get("serper_page", key)
@@ -53,6 +60,7 @@ def _serper_page(query, page, page_size):
         if url: results.append({"title": title, "url": url, "snippet": snippet})
     _cache_set("serper_page", key, results)
     return results
+
 # Returns serper results used by scraping.
 def _serper_results(query, limit):
     results = []; page_size = 10; page_count = (max(1, int(limit)) + page_size - 1) // page_size
@@ -62,6 +70,7 @@ def _serper_results(query, limit):
         results.extend(page_results)
         if len(results) >= int(limit): break
     return results[:limit]
+
 # Returns wikipedia results used by scraping.
 def _wikipedia_results(query, limit):
     key = _cache_key({"query": query, "limit": int(limit)}); cached = _cache_get("wikipedia_results", key)
@@ -70,6 +79,7 @@ def _wikipedia_results(query, limit):
     snippets = payload[2] if len(payload) > 2 else []; urls = payload[3] if len(payload) > 3 else []; results = [{"title": titles[idx] if idx < len(titles) else "", "snippet": snippets[idx] if idx < len(snippets) else "", "url": urls[idx] if idx < len(urls) else "",} for idx in range(min(len(urls), int(limit))) if idx < len(urls) and urls[idx]]
     _cache_set("wikipedia_results", key, results)
     return results
+
 # Returns cached or live search results for one query and offset.
 def search_results(query, limit=SCRAPE_DEFAULT_LIMIT, offset=0):
     query = clean_text(query)
@@ -86,6 +96,7 @@ def search_results(query, limit=SCRAPE_DEFAULT_LIMIT, offset=0):
         seen.add(url); unique.append(item)
     if not unique and errors: raise RuntimeError(" ".join(errors[:2]))
     return unique[offset : offset + limit]
+
 # Returns fetch url text for scraping.
 def _fetch_url_text(url):
     url = _clean_url(url)
@@ -94,15 +105,18 @@ def _fetch_url_text(url):
     if cached is not None: return str(cached or "")
     response = requests.get(url, headers=HEADERS, timeout=SERPER_PAGE_TIMEOUT); response.raise_for_status(); downloaded = response.text; extracted = trafilatura.extract(downloaded,include_comments=False,include_tables=False,favor_precision=True,); text = clean_text(extracted); _cache_set("page_text", url, text)
     return text
+
 # Returns snippet block for scraping.
 def _snippet_block(result):
     snippet = clean_text(result.get("snippet", ""))
     if not snippet: return None
     return {"content": snippet[:MAX_CHARS_PER_BLOCK], "tag": _result_tag(result.get("title", ""), result.get("url", "")), "url": _clean_url(result.get("url", ""))}
+
 # Builds block fingerprint for scraping.
 def _block_fingerprint(block):
     url = _clean_url((block or {}).get("url", "")); content = clean_text((block or {}).get("content", "")).lower()
     return (url, content[:512]) if url else ("content", content[:512])
+
 # Builds source-tagged text blocks for one search query from search and page results.
 def blocks_for_query(query, limit=SCRAPE_DEFAULT_LIMIT, offset=0, prefer_snippets=False):
     blocks = []; seen_blocks = set()
@@ -127,6 +141,7 @@ def blocks_for_query(query, limit=SCRAPE_DEFAULT_LIMIT, offset=0, prefer_snippet
             seen_blocks.add(fingerprint); blocks.append(block)
         if len(blocks) >= limit: break
     return blocks
+
 # Consumes search queries, scrapes text blocks, and sends them to extraction workers.
 def scrape_worker_loop(scrape_queue, extract_queue, stop_event, sync_counter):
     while not stop_event.is_set():
