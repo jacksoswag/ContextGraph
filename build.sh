@@ -11,8 +11,8 @@ ROOT_DIR="$(pwd)"
 
 #  0. Cleanup Stale Processes
 echo "[BUILD] Cleaning up any stale instances..."
-killall -9 physics_engine &>/dev/null || true
-killall -9 thought_engine &>/dev/null || true
+killall -9 physics-engine &>/dev/null || true
+killall -9 thought-engine &>/dev/null || true
 pkill -9 -f "python main.py" &>/dev/null || true
 pkill -9 -f "python3 main.py" &>/dev/null || true
 
@@ -83,8 +83,8 @@ source venv/bin/activate
 # Upgrade pip (no longer silent so you can see it's working)
 echo "[DEPS] Upgrading pip..."
 ./venv/bin/python3 -m pip install --upgrade pip
-echo "[DEPS] Installing dependencies from requirements.txt (this may take a few minutes for Torch)..."
-./venv/bin/python3 -m pip install -r requirements.txt
+echo "[DEPS] Installing dependencies from u_requirements.txt (this may take a few minutes for Torch)..."
+./venv/bin/python3 -m pip install -r u_requirements.txt
 echo "[DEPS] Python packages ✓"
 
 #  5. spaCy model
@@ -98,8 +98,8 @@ echo "  Dependencies ready. Starting services + build..."
 
 #  6. Cleanup previous run
 echo "[BUILD] Cleaning up previous session..."
-killall -9 physics_engine 2>/dev/null || true
-killall -9 thought_engine 2>/dev/null || true
+killall -9 physics-engine 2>/dev/null || true
+killall -9 thought-engine 2>/dev/null || true
 
 #  7. Ollama: start if not already serving
 echo "[BUILD] Checking Ollama server..."
@@ -149,15 +149,15 @@ index_path.write_text(text)
 PY
 
 #  9. Compile C++ components
-echo "[BUILD] p_physics.cpp -> physics_engine"
+echo "[BUILD] p_physics.cpp -> venv/physics-engine"
 g++ -O3 -std=c++17 \
     -I"$(brew --prefix raylib)/include" \
     -L"$(brew --prefix raylib)/lib" -lraylib \
     -framework CoreVideo -framework IOKit -framework Cocoa -framework OpenGL \
-    p_physics.cpp -o physics_engine
+    p_physics.cpp -o venv/physics-engine
 
-echo "[BUILD] p_thought.cpp -> thought_engine"
-g++ -O3 -std=c++17 p_thought.cpp -o thought_engine
+echo "[BUILD] p_thought.cpp -> venv/thought-engine"
+g++ -O3 -std=c++17 p_thought.cpp -o venv/thought-engine
 
 echo "[BUILD] Build complete."
 
@@ -165,8 +165,8 @@ echo "[BUILD] Build complete."
 cleanup() {
     echo ""
     echo "[SHUTDOWN] Killing engine workers..."
-    killall -9 physics_engine &>/dev/null || true
-    killall -9 thought_engine &>/dev/null || true
+    killall -9 physics-engine &>/dev/null || true
+    killall -9 thought-engine &>/dev/null || true
     pkill -9 -f "$ROOT_DIR/frontend/ui.py" &>/dev/null || true
     echo "[SHUTDOWN] Done."
 }

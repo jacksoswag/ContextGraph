@@ -12,19 +12,17 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
-
 const int MAX_AGENTS = 64000;
 const int MAX_CONNECTIONS = 80000;
 const int CONNECTION_RECORD_SIZE = 40;
 const int DEFAULT_MAX_HOPS = 12;
-
 struct AgentPos {
   float x, y, z;
   float vx, vy, vz;
 };
-
 struct LC {
   int idxA;
   int type;
@@ -37,36 +35,43 @@ struct LC {
   int predicateTenseExact;
   int predicateTruthExact;
 };
-
 struct Edge {
   int connectionIndex;
   int from;
   int to;
   int reversed;
 };
-
+struct ReverseEdge {
+  int connectionIndex;
+  int from;
+  int to;
+  int reversed;
+};
 struct Seed {
   int agentIndex;
   int spawnCount;
   int goalIndex;
   int routeIndex;
 };
-
 struct Step {
   int connectionIndex;
   int from;
   int to;
   int reversed;
 };
-
+struct GoalRouteTree {
+  std::vector<unsigned char> reachable;
+  std::vector<int> nextNode;
+  std::vector<int> nextConnection;
+  std::vector<int> nextReversed;
+};
 static_assert(sizeof(LC) == CONNECTION_RECORD_SIZE,
               "LC shared-memory record size mismatch");
-
+// Maps one shared-memory segment for the native thought process.
 void *map_shm(const char *env_var, size_t size) {
   const char *name = getenv(env_var);
   if (!name) {
-    std::cerr << "[THOUGHT_CPP] ERROR: Env var " << env_var << " not set."
-              << std::endl;
+    std::cerr << "[THOUGHT_CPP] ERROR: Env var " << env_var << " not set." << std::endl;
     return nullptr;
   }
   std::string shm_name = name;
@@ -90,9 +95,9 @@ void *map_shm(const char *env_var, size_t size) {
   close(fd);
   return ptr;
 }
-
+// Returns whether an agent index fits the shared-memory bounds.
 bool valid_agent_index(int idx) { return idx >= 0 && idx < MAX_AGENTS; }
-
+// Returns Euclidean distance between two shared-memory agent positions.
 float distance_between(const AgentPos *positions, int left, int right) {
   const AgentPos &a = positions[left];
   const AgentPos &b = positions[right];
@@ -102,7 +107,7 @@ float distance_between(const AgentPos *positions, int left, int right) {
   const float dist = std::sqrt((dx * dx) + (dy * dy) + (dz * dz));
   return std::max(dist, 0.001f);
 }
-
+// Reads route seeds and max-hop settings from the Python-written input file.
 bool read_input(const std::string &path, int &max_hops, std::vector<Seed> &seeds) {
   std::ifstream in(path);
   if (!in) {
@@ -110,7 +115,6 @@ bool read_input(const std::string &path, int &max_hops, std::vector<Seed> &seeds
               << std::endl;
     return false;
   }
-
   std::string kind;
   while (in >> kind) {
     if (kind == "max_hops") {
@@ -133,11 +137,10 @@ bool read_input(const std::string &path, int &max_hops, std::vector<Seed> &seeds
       std::getline(in, rest);
     }
   }
-
   max_hops = std::max(1, max_hops);
   return !seeds.empty();
 }
-
+// Chooses the next route edge, favoring reachable unvisited nodes near the current node.
 const Edge *choose_edge(const std::vector<Edge> &edges, const AgentPos *positions,
                         int previous, const std::unordered_set<int> &visited,
                         const std::vector<unsigned char> &can_reach_goal,
@@ -146,7 +149,6 @@ const Edge *choose_edge(const std::vector<Edge> &edges, const AgentPos *position
   std::vector<double> weights;
   candidates.reserve(edges.size());
   weights.reserve(edges.size());
-
   for (int pass = 0; pass < 3; pass++) {
     candidates.clear();
     weights.clear();
@@ -168,101 +170,75 @@ const Edge *choose_edge(const std::vector<Edge> &edges, const AgentPos *position
       if (edge.to == goal) {
         return &edge;
       }
-
       const float dist = distance_between(positions, edge.from, edge.to);
       double weight = 1.0 / static_cast<double>(dist);
       candidates.push_back(&edge);
       weights.push_back(weight);
     }
-
     if (!candidates.empty()) {
       std::discrete_distribution<size_t> distribution(weights.begin(),
                                                        weights.end());
       return candidates[distribution(rng)];
     }
   }
-
   return nullptr;
 }
-
-std::vector<unsigned char> nodes_that_can_reach_goal(
-    int goal, const std::vector<std::vector<int>> &reverse_adjacency) {
-  std::vector<unsigned char> reachable(MAX_AGENTS, 0);
+// Builds reverse reachability and next-hop tables for a goal agent.
+GoalRouteTree build_goal_route_tree(
+    int goal, const std::vector<std::vector<ReverseEdge>> &reverse_adjacency) {
+  GoalRouteTree tree{};
+  tree.reachable.assign(MAX_AGENTS, 0);
+  tree.nextNode.assign(MAX_AGENTS, -1);
+  tree.nextConnection.assign(MAX_AGENTS, -1);
+  tree.nextReversed.assign(MAX_AGENTS, 0);
   if (!valid_agent_index(goal)) {
-    return reachable;
+    return tree;
   }
-
   std::vector<int> frontier;
   frontier.reserve(1024);
   frontier.push_back(goal);
-  reachable[goal] = 1;
-
+  tree.reachable[goal] = 1;
+  tree.nextNode[goal] = goal;
   for (size_t cursor = 0; cursor < frontier.size(); cursor++) {
     int node = frontier[cursor];
-    for (int source : reverse_adjacency[node]) {
-      if (!valid_agent_index(source) || reachable[source]) {
+    for (const ReverseEdge &edge : reverse_adjacency[node]) {
+      if (!valid_agent_index(edge.from) || tree.reachable[edge.from]) {
         continue;
       }
-      reachable[source] = 1;
-      frontier.push_back(source);
+      tree.reachable[edge.from] = 1;
+      tree.nextNode[edge.from] = edge.to;
+      tree.nextConnection[edge.from] = edge.connectionIndex;
+      tree.nextReversed[edge.from] = edge.reversed;
+      frontier.push_back(edge.from);
     }
   }
-
-  return reachable;
+  return tree;
 }
-
-bool append_shortest_path_tail(
-    int start, int goal, const std::vector<std::vector<Edge>> &adjacency,
-    std::vector<Step> &path) {
+// Appends the deterministic route tail from a current node to its goal.
+bool append_goal_route_tail(int start, int goal, const GoalRouteTree &tree,
+                            std::vector<Step> &path) {
   if (!valid_agent_index(start) || !valid_agent_index(goal)) {
     return false;
   }
   if (start == goal) {
     return true;
   }
-
-  std::vector<int> parent(MAX_AGENTS, -1);
-  std::vector<int> parent_connection(MAX_AGENTS, -1);
-  std::vector<int> parent_reversed(MAX_AGENTS, 0);
-  std::vector<int> frontier;
-  frontier.reserve(1024);
-  frontier.push_back(start);
-  parent[start] = start;
-
-  bool found = false;
-  for (size_t cursor = 0; cursor < frontier.size() && !found; cursor++) {
-    int node = frontier[cursor];
-    for (const Edge &edge : adjacency[node]) {
-      if (!valid_agent_index(edge.to) || parent[edge.to] != -1 ||
-          edge.to == edge.from) {
-        continue;
-      }
-      parent[edge.to] = node;
-      parent_connection[edge.to] = edge.connectionIndex;
-      parent_reversed[edge.to] = edge.reversed;
-      if (edge.to == goal) {
-        found = true;
-        break;
-      }
-      frontier.push_back(edge.to);
-    }
-  }
-
-  if (!found) {
+  if (tree.reachable.empty() || !tree.reachable[start]) {
     return false;
   }
-
-  std::vector<Step> tail;
-  for (int node = goal; node != start; node = parent[node]) {
-    int from = parent[node];
-    tail.push_back(
-        Step{parent_connection[node], from, node, parent_reversed[node]});
+  int current = start;
+  for (int guard = 0; guard < MAX_AGENTS && current != goal; guard++) {
+    int next = tree.nextNode[current];
+    int connection = tree.nextConnection[current];
+    if (!valid_agent_index(next) || connection < 0 || next == current) {
+      return false;
+    }
+    path.push_back(Step{connection, current, next, tree.nextReversed[current]});
+    current = next;
   }
-  std::reverse(tail.begin(), tail.end());
-  path.insert(path.end(), tail.begin(), tail.end());
-  return true;
+  return current == goal;
 }
-
+// Runs native route sampling and writes thought paths back for Python to load.
 int main() {
   const char *input_env = getenv("THOUGHT_INPUT");
   const char *output_env = getenv("THOUGHT_OUTPUT");
@@ -271,7 +247,6 @@ int main() {
               << std::endl;
     return 1;
   }
-
   AgentPos *positions =
       (AgentPos *)map_shm("SHM_POS", MAX_AGENTS * sizeof(AgentPos));
   void *connection_base =
@@ -279,21 +254,18 @@ int main() {
   if (!positions || !connection_base) {
     return 1;
   }
-
   int max_hops = DEFAULT_MAX_HOPS;
   std::vector<Seed> seeds;
   if (!read_input(input_env, max_hops, seeds)) {
     std::cerr << "[THOUGHT_CPP] No usable thought seeds with assigned goals." << std::endl;
     return 2;
   }
-
   int *connection_count_ptr = (int *)connection_base;
   LC *connections = (LC *)((char *)connection_base + 4);
   int connection_count = *connection_count_ptr;
   connection_count = std::max(0, std::min(connection_count, MAX_CONNECTIONS));
-
   std::vector<std::vector<Edge>> adjacency(MAX_AGENTS);
-  std::vector<std::vector<int>> reverse_adjacency(MAX_AGENTS);
+  std::vector<std::vector<ReverseEdge>> reverse_adjacency(MAX_AGENTS);
   for (int i = 0; i < connection_count; i++) {
     const LC &connection = connections[i];
     if (!valid_agent_index(connection.idxA) ||
@@ -302,25 +274,32 @@ int main() {
     }
     adjacency[connection.idxA].push_back(
         Edge{i, connection.idxA, connection.idxB, 0});
-    reverse_adjacency[connection.idxB].push_back(connection.idxA);
+    reverse_adjacency[connection.idxB].push_back(
+        ReverseEdge{i, connection.idxA, connection.idxB, 0});
   }
-
   std::ofstream out(output_env);
   if (!out) {
     std::cerr << "[THOUGHT_CPP] ERROR: could not write output file "
               << output_env << std::endl;
     return 1;
   }
-
   std::mt19937 rng(
       static_cast<unsigned int>(
           std::chrono::high_resolution_clock::now().time_since_epoch().count()));
   int thought_count = 0;
   int success_count = 0;
-
+  std::unordered_map<int, GoalRouteTree> route_tree_by_goal;
   for (const Seed &seed : seeds) {
-    const std::vector<unsigned char> can_reach_goal =
-        nodes_that_can_reach_goal(seed.goalIndex, reverse_adjacency);
+    auto route_entry = route_tree_by_goal.find(seed.goalIndex);
+    if (route_entry == route_tree_by_goal.end()) {
+      route_entry = route_tree_by_goal
+                        .emplace(seed.goalIndex,
+                                 build_goal_route_tree(seed.goalIndex,
+                                                       reverse_adjacency))
+                        .first;
+    }
+    const GoalRouteTree &route_tree = route_entry->second;
+    const std::vector<unsigned char> &can_reach_goal = route_tree.reachable;
     for (int spawn = 0; spawn < seed.spawnCount; spawn++) {
       int current = seed.agentIndex;
       int previous = -1;
@@ -329,7 +308,6 @@ int main() {
       visited.insert(current);
       std::string reason = "max_hops";
       bool success = false;
-
       if (!valid_agent_index(current) || !can_reach_goal[current]) {
         reason = "dead";
       } else {
@@ -339,18 +317,15 @@ int main() {
             success = true;
             break;
           }
-
           if (!valid_agent_index(current) || adjacency[current].empty()) {
             break;
           }
-
           const Edge *edge = choose_edge(adjacency[current], positions, previous,
                                          visited, can_reach_goal, seed.goalIndex,
                                          rng);
           if (!edge) {
             break;
           }
-
           path.push_back(
               Step{edge->connectionIndex, edge->from, edge->to, edge->reversed});
           previous = current;
@@ -358,21 +333,18 @@ int main() {
           visited.insert(current);
         }
       }
-
       if (!success) {
         if (current == seed.goalIndex ||
-            append_shortest_path_tail(current, seed.goalIndex, adjacency, path)) {
+            append_goal_route_tail(current, seed.goalIndex, route_tree, path)) {
           current = seed.goalIndex;
           reason = "endpoint";
           success = true;
         }
       }
-
       if (success) {
         success_count++;
       }
       thought_count++;
-
       out << "thought " << seed.agentIndex << " " << current << " " << reason
           << " " << (success ? 1 : 0) << " " << path.size() << " "
           << seed.goalIndex << " " << seed.routeIndex << "\n";
@@ -383,7 +355,6 @@ int main() {
       out << "end\n";
     }
   }
-
   std::cout << "[THOUGHT_CPP] Completed " << thought_count << " thoughts with "
             << success_count << " assigned endpoints." << std::endl;
   return 0;
