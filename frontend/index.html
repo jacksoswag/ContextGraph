@@ -1,6 +1,5 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -10,9 +9,8 @@
     <link
         href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
         rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=sidebar-debug-1">
 </head>
-
 <body>
     <div id="app">
         <!-- Sidebar: Research Synthesis -->
@@ -28,36 +26,31 @@
                     <p class="placeholder">Awaiting research grounding...</p>
                 </div>
             </div>
-
             <footer>
                 <button id="copy-btn">COPY CHAT</button>
             </footer>
         </aside>
-
         <!-- Main Workspace: 3D Visualization -->
         <main id="workspace">
             <div id="canvas-container"></div>
-
             <!-- Floating Controls -->
             <div id="ui-overlay">
                 <div class="top-bar">
                     <h1>Forensic Intelligence Engine</h1>
                 </div>
-
                 <div class="bottom-controls">
                     <div class="input-group">
                         <label>TARGET A</label>
-                        <input type="text" id="input-target-a" placeholder="e.g. cause">
+                        <input type="text" id="input-target-a" placeholder="e.g. Urban Sprawl">
                     </div>
                     <div class="input-group">
                         <label>TARGET B</label>
-                        <input type="text" id="input-target-b" placeholder="e.g. outcome">
+                        <input type="text" id="input-target-b" placeholder="e.g. Housing Affordability">
                     </div>
                     <button id="launch-btn">LAUNCH RESEARCH</button>
                 </div>
             </div>
         </main>
-
         <aside id="history-sidebar">
             <header>
                 <h2>RESEARCH HISTORY</h2>
@@ -68,7 +61,6 @@
             </div>
         </aside>
     </div>
-
     <!-- Three.js and App Logic -->
     <script type="importmap">
         {
@@ -78,7 +70,6 @@
             }
         }
     </script>
-    <script type="module" src="main.js?v=new-prompt-reset-1"></script>
+    <script type="module" src="main.js?v=sidebar-debug-1"></script>
 </body>
-
 </html>
