@@ -272,7 +272,3 @@ Runtime output is written to:
 - `sql/` for local caches.
 - `results/` for synthesis output.
 - `venv/` for the local Python environment and compiled native engines.
-
-## License
-
-ISC
