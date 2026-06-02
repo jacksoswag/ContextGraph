@@ -23,6 +23,7 @@ class TreeContext:
         self.store = store
         self._anc: dict[str, np.ndarray | None] = {}
         self._adj: dict[str, list[tuple[str, float]]] = {}
+        self._deg: dict[str, int] = {}
     def neighbors(self, nid: str) -> list[tuple[str, float]]:
         v = self._adj.get(nid)
         if v is None: v = self._adj[nid] = self.store.neighbors(nid)
@@ -30,8 +31,22 @@ class TreeContext:
     def anchor(self, nid: str) -> np.ndarray | None:
         if nid not in self._anc: self._anc[nid] = self.store.anchor(nid)
         return self._anc[nid]
+    # degree: node genericity (cached) — cheap COUNT when available, else adjacency length
+    def degree(self, nid: str) -> int:
+        d = self._deg.get(nid)
+        if d is None:
+            if nid in self._adj: d = len(self._adj[nid])
+            elif hasattr(self.store, "degree"): d = self.store.degree(nid)
+            else: d = len(self.neighbors(nid))
+            self._deg[nid] = d
+        return d
     @property
     def loaded(self) -> int: return len(self._adj)
+
+# specificity: 1/(1+ln(1+deg)) — high for specific (low-degree) concepts, low for generic hubs.
+# Steers the front toward informative edges and away from generic high-degree nodes.
+def _specificity(deg: int) -> float:
+    return 1.0 / (1.0 + math.log1p(max(deg, 0)))
 
 # episode_from_nodes: materialize an Episode over an EXPLICIT node set (edges = those among the set).
 def episode_from_nodes(ctx: TreeContext, node_ids: list[str]) -> Episode:
@@ -52,10 +67,16 @@ def episode_from_nodes(ctx: TreeContext, node_ids: list[str]) -> Episode:
 
 @dataclass
 class DomainConfig:
-    # thresholds are FRACTIONS of R_max² (a fixed scale, not max-relative — so breadth can't collapse)
-    eps_low: float = 0.02      # cull a non-anchor below this (cold backwater)
-    eps_high: float = 0.20     # load SQL neighbors of nodes above this (hot boundary)
-    eps_commit: float = 0.08   # commit (ever-hot ⇒ output + re-anchor) above this
+    # HYBRID commit threshold: commit fires on EITHER absolute activation (fraction of R_max² — works
+    # on sparse topologies) OR relative top-quantile of the live r (works on dense/diluted seeds whose
+    # nodes all sit below the absolute cutoff). thr_commit = min(abs, qtl), floored. The frontier
+    # then EXPANDS FROM THE COMMITTED FRONT (every recent-committed node pushes outward), so a seed
+    # whose neighbors commit but never become top-quantile still advances. Cull stays absolute.
+    eps_low: float = 0.02      # cull a non-anchor below this fraction of R_max² (absolute, cold)
+    eps_commit: float = 0.06   # absolute commit cutoff — relaxed by q_commit when diluted
+    q_commit: float = 0.70     # relative escape: also-commit if in the top (1−this) of live r
+    commit_floor: float = 0.005  # hard floor (×R_max²) so a fully-cold gather commits nothing
+    specificity_load: bool = True  # prefer specific (low-degree) neighbors when loading the frontier
     max_phases: int = 16
     max_live: int = 400        # bound the live simulation (flat compute)
     loads_per_phase: int = 80  # frontier I/O budget per phase
@@ -94,9 +115,10 @@ def adaptive_gather(ctx: TreeContext, seed_ids: list[str], cfg: FieldConfig = DE
         # live anchors = seeds (permanent) + committed within the TTL window (carry the trail)
         live_anchor = {s for s in seed_set} | {
             n for n, ph in commit_phase.items() if ph >= 0 and phase - ph < dcfg.anchor_ttl and n in live}
-        if len(live) > dcfg.max_live:                   # compute bound: drop coldest non-anchors
+        if len(live) > dcfg.max_live:                   # compute bound: drop cold AND generic first
             extra = sorted((n for n in live if n not in live_anchor and n not in seed_set),
-                           key=lambda n: float((state.get(n, torch.zeros(cfg.d)) ** 2).sum()))
+                           key=lambda n: float((state.get(n, torch.zeros(cfg.d)) ** 2).sum())
+                                          * _specificity(ctx.degree(n)))
             for n in extra[: len(live) - dcfg.max_live]: live.discard(n)
         ep = episode_from_nodes(ctx, sorted(live))      # sorted ⇒ deterministic indexing
         C, cfg2 = safe_build(ep, cfg)
@@ -116,29 +138,39 @@ def adaptive_gather(ctx: TreeContext, seed_ids: list[str], cfg: FieldConfig = DE
         Xh, _ = rollout(X0, C, cfg2, Anchor(mask=mask, target=target))
         Xs = Xh[-1]; r = (Xs * Xs).sum(-1)              # relevance per live node
 
-        # observe → record committed (ever-hot); refresh warm-start/anchor state for live nodes
+        # hybrid commit threshold: min(absolute, relative-quantile), floored — fires on genuine
+        # activation (sparse) or relative-top (dense/diluted). Cull stays absolute.
+        thr_cold = dcfg.eps_low * R2
+        thr_commit = max(dcfg.commit_floor * R2,
+                         min(dcfg.eps_commit * R2, float(torch.quantile(r, dcfg.q_commit))))
+
+        # observe → record committed; refresh warm-start/anchor state for live nodes
         state = {nid: Xs[ep.id_to_idx[nid]].clone() for nid in ep.node_ids}
         for nid in ep.node_ids:
             ri = float(r[ep.id_to_idx[nid]])
-            if ri >= dcfg.eps_commit * R2 or nid in seed_set:
+            if ri >= thr_commit or nid in seed_set:
                 if nid not in commit_phase: commit_phase[nid] = phase
                 committed[nid] = max(committed.get(nid, 0.0), ri)
 
-        # DOMAIN EDIT (no physics here): cull cold non-anchors, load neighbors of hot boundary
+        # DOMAIN EDIT (no physics here): cull cold non-anchors; EXPAND from the recent-committed front
         keep = set(seed_set) | live_anchor
         cold = {nid for nid in ep.node_ids
-                if float(r[ep.id_to_idx[nid]]) < dcfg.eps_low * R2 and nid not in keep}
+                if float(r[ep.id_to_idx[nid]]) <= thr_cold and nid not in keep}
         expired = {n for n, ph in commit_phase.items()      # baton passed: drop from live sim (stay in output)
                    if ph >= 0 and phase - ph >= dcfg.anchor_ttl and n not in seed_set and n in live}
-        hot = [nid for nid in ep.node_ids if float(r[ep.id_to_idx[nid]]) >= dcfg.eps_high * R2]
-        loaded: set[str] = set()
-        for nid in hot:
+        front = [nid for nid in ep.node_ids if nid in seed_set or                  # the live committed
+                 (commit_phase.get(nid, -2) >= 0 and phase - commit_phase[nid] < dcfg.anchor_ttl)]
+        # gather candidate frontier, then load by SPECIFICITY (prefer specific over generic hubs)
+        cand: dict[str, str] = {}
+        for nid in front:
             for nbr, _ in ctx.neighbors(nid):
-                if nbr not in live and nbr not in just_culled and nbr not in loaded:
-                    loaded.add(nbr)
-                    if nbr not in parent: parent[nbr] = nid       # provenance: who loaded it
-                    if len(loaded) >= dcfg.loads_per_phase: break
-            if len(loaded) >= dcfg.loads_per_phase: break
+                if nbr not in live and nbr not in just_culled and nbr not in cand: cand[nbr] = nid
+        cand_ids = list(cand)
+        if dcfg.specificity_load and len(cand_ids) > dcfg.loads_per_phase:
+            cand_ids.sort(key=lambda v: (-_specificity(ctx.degree(v)), v))
+        loaded = set(cand_ids[: dcfg.loads_per_phase])
+        for v in loaded:
+            if v not in parent: parent[v] = cand[v]          # provenance: who loaded it
         total_loaded += len(loaded)
         peak = max(peak, len(live))
         trace.append({"phase": phase, "live": len(live), "committed": len(committed),

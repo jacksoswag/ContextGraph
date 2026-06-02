@@ -36,8 +36,11 @@ class GraphStore:
             "SELECT source_id, score FROM edges WHERE target_id=?", (node_id,)).fetchall()
         return [(n, float(s if s is not None else 0.0)) for n, s in out + inc if n != node_id]
 
+    # degree: cheap COUNT (no row materialization) — node genericity for specificity weighting
     def degree(self, node_id: str) -> int:
-        return len(self.neighbors(node_id))
+        o = self._con.execute("SELECT COUNT(*) FROM edges WHERE source_id=?", (node_id,)).fetchone()[0]
+        i = self._con.execute("SELECT COUNT(*) FROM edges WHERE target_id=?", (node_id,)).fetchone()[0]
+        return int(o + i)
 
     # find: text → node-ids via FTS (porter-stemmed), ranked. Seed entry points for interpret (§4).
     def find(self, query: str, k: int = 5) -> list[str]:

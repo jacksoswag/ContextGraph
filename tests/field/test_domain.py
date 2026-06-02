@@ -25,11 +25,11 @@ def _chain_store(N=14, sim=0.02, seed=1):
     anc = {i: F.normalize(base + sim * torch.randn(384, generator=g), dim=0).numpy().astype(np.float32) for i in ids}
     return _Store(adj, anc), ids
 
-# config tuned so the front demonstrably advances (low decay + low commit threshold)
+# config tuned so the front demonstrably advances (low decay; distribution-relative thresholds)
 def _cfg(): return dataclasses.replace(DEFAULT_CFG, decay=0.4, H_max=4000)
 def _dcfg(**kw):
-    base = dict(eps_low=0.01, eps_high=0.08, eps_commit=0.05, max_phases=20, max_live=8,
-                loads_per_phase=4, anchor_ttl=2)
+    base = dict(eps_low=0.01, eps_commit=0.05, q_commit=0.70, commit_floor=0.005,
+                max_phases=20, max_live=8, loads_per_phase=4, anchor_ttl=2)
     return DomainConfig(**{**base, **kw})
 
 # ── episode_from_nodes ────────────────────────────────────────────────────────────
