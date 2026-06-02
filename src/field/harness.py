@@ -33,15 +33,63 @@ class CaseResult:
     elapsed_s: float
 
 
-# Minimal quality check: does any expected target appear in basin node texts?
+# Quality score: embedding cosine similarity between expected targets and basin nodes,
+# weighted by basin node specificity. Mirrors the retrieval.py scoring pattern:
+# effective_score = cosine * (0.70 + 0.30 * specificity).
+# A target counts as "hit" when any basin's effective_score >= HIT_THRESHOLD.
+# Specificity weighting suppresses generic hub nodes (e.g. "data", "system") from
+# falsely counting as hits; targets are embedded once, basin info_vectors reused.
+# Falls back to substring match when the embedder is unavailable.
+_HIT_THRESHOLD = 0.55   # effective cosine floor; conservative to avoid false positives
+_DEFAULT_SPEC  = 0.5    # used when node_stats row is absent
+
 def _quality_score(case: dict, basins: list[str], conn) -> float:
-    if not basins or not case.get("expected_targets"): return 0.0
-    texts = set()
+    expected = case.get("expected_targets", [])
+    if not basins or not expected: return 0.0
+    try:
+        return _quality_score_vec(expected, basins, conn)
+    except Exception:
+        return _quality_score_substr(expected, basins, conn)
+
+def _quality_score_vec(expected: list[str], basins: list[str], conn) -> float:
+    import numpy as np
+    from graph.vector import embed, unpack
+    # Embed each expected target (short words/phrases — fast)
+    target_vecs: list[tuple[str, np.ndarray]] = []
+    for t in expected:
+        blob = embed(t)
+        if blob is not None: target_vecs.append((t, unpack(blob)))
+    if not target_vecs: return _quality_score_substr(expected, basins, conn)
+    # Load basin info_vectors + specificities in one query per chunk
+    basin_data: list[tuple[np.ndarray, float]] = []
+    for i in range(0, len(basins[:32]), 900):
+        chunk = basins[i : i+900]
+        ph = ",".join("?" * len(chunk))
+        for r in conn.execute(
+            f"SELECT n.info_vector, COALESCE(ns.specificity, {_DEFAULT_SPEC}) "
+            f"FROM nodes n LEFT JOIN node_stats ns ON ns.node_id = n.id "
+            f"WHERE n.id IN ({ph})", chunk
+        ):
+            if r[0]:
+                basin_data.append((unpack(r[0]), float(r[1] if r[1] is not None else _DEFAULT_SPEC)))
+    if not basin_data: return _quality_score_substr(expected, basins, conn)
+    # Score: max effective cosine over basins per target; count hits
+    hits = 0.0
+    for _, t_vec in target_vecs:
+        best = max(
+            float(np.dot(t_vec, b_vec)) * (0.70 + 0.30 * spec)
+            for b_vec, spec in basin_data
+        )
+        if best >= _HIT_THRESHOLD: hits += 1.0
+    return hits / len(target_vecs)
+
+def _quality_score_substr(expected: list[str], basins: list[str], conn) -> float:
+    texts: set[str] = set()
     for nid in basins[:32]:
         row = conn.execute("SELECT text FROM nodes WHERE id=?", (nid,)).fetchone()
         if row: texts.add((row[0] or "").lower())
-    hits = sum(1 for t in case["expected_targets"] if any(t.lower() in tx for tx in texts))
-    return hits / max(len(case["expected_targets"]), 1)
+    hits = sum(1 for t in expected if any(t.lower() in tx for tx in texts))
+    return hits / max(len(expected), 1)
 
 
 # Seed the graph with memory_facts from a stress case (using GraphStore).
