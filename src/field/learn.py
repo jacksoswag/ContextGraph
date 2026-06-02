@@ -81,26 +81,22 @@ class FieldLearner:
 
     # Laplacian consistency loss: forbids reordering of semantic neighborhood.
     # Builds anchor k-NN graph (cosine), computes R_topo = (1/|E_a|) Σ s_a(i,j)·‖x_i-x_j‖²
+    # Vectorized: gather all [N, k] neighbor latents in one op, no Python loop.
     def _topo_loss(self, X: Tensor, A: Tensor) -> Tensor:
-        N = A.shape[0]
+        N, d = X.shape
         k = min(self.cfg.knn_k, N - 1)
         if k < 1: return torch.tensor(0.0)
         with torch.no_grad():
-            # Cosine similarity matrix of anchors
             A_norm = A / (A.norm(dim=-1, keepdim=True) + self.cfg.eps)
             sim = A_norm @ A_norm.T   # [N, N]
-            # k-NN graph: keep top-k neighbors per row (exclude self)
             sim.fill_diagonal_(-2.0)
             knn_vals, knn_idx = sim.topk(k, dim=-1)   # [N, k]
-        # Compute weighted pairwise distance in latent space
-        total_loss = torch.tensor(0.0)
-        count = 0
-        for i in range(N):
-            for j_loc in range(k):
-                j = int(knn_idx[i, j_loc].item())
-                s_ij = float(knn_vals[i, j_loc].item())
-                if s_ij <= 0: continue
-                diff_sq = ((X[i] - X[j])**2).sum()
-                total_loss = total_loss + s_ij * diff_sq
-                count += 1
-        return total_loss / max(count, 1)
+            mask = knn_vals > 0                        # [N, k]
+        # Gather neighbor latents: X_nbr[i, j] = X[knn_idx[i, j]]
+        X_nbr = X[knn_idx.view(-1)].view(N, k, d)     # [N, k, d]
+        X_src = X.unsqueeze(1).expand_as(X_nbr)        # [N, k, d]
+        diff_sq = (X_src - X_nbr).pow(2).sum(-1)       # [N, k]
+        # Weight by anchor cosine similarity; mask non-positive entries
+        weighted = (knn_vals * diff_sq * mask.float()).sum()
+        count = mask.sum().clamp(min=1)
+        return weighted / count

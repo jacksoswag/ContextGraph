@@ -62,6 +62,16 @@ class FieldModel(torch.nn.Module):
 
 # Execute one step of the field dynamics (§6, §10 fixed ordering).
 # Actuators carry lagged C-control signals (§10.6); defaults from cfg on first step.
+# FM2 guard: detect attractor freeze — all X rows collapsed to the same direction.
+# Fires when per-row variance of X falls below eps_field_diversity.
+# Only meaningful for N >= 2; silently skips single-node episodes.
+def assert_field_diversity(X: Tensor, cfg: FieldConfig) -> None:
+    if X.shape[0] < 2: return
+    row_var = float(X.var(dim=-1).mean().item())
+    assert row_var >= cfg.eps_field_diversity, \
+        f"FM2 GUARD: field diversity={row_var:.2e} < {cfg.eps_field_diversity:.2e} (attractor freeze)"
+
+
 def field_step(state: FieldState, ep: Episode, model: FieldModel,
                actuators: Actuators | None = None) -> StepResult:
     cfg = model.cfg
@@ -112,6 +122,8 @@ def rollout(init: FieldState, ep: Episode, model: FieldModel,
         res = field_step(current, ep, model, act)
         # Enforce §9 guards at runtime
         assert_memory_norm(res.m_next, cfg)
+        # §10 FM2 guard: field diversity — detect attractor freeze
+        assert_field_diversity(res.x_next, cfg)
         # L1-delta termination: compare current X to x_next
         delta = float((res.x_next.detach() - current.X.detach()).abs().mean().item())
         # Advance state: X becomes x_next (detach so each step is independent leaf)

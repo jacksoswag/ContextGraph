@@ -84,3 +84,11 @@ class FieldRouter(nn.Module):
     def assert_kernel_entropy(phi: Tensor, cfg: FieldConfig) -> None:
         var = float(phi.var().item())
         assert var >= cfg.eps_phi, f"§9.2 VIOLATION: Var(φ_t)={var:.6f} < eps_phi={cfg.eps_phi}"
+
+    # FM5 guard: detect routing collapse — g_mem entropy below floor signals single-path degeneration.
+    # Entropy of uniform over N nodes = log(N); collapsed = ~0.
+    @staticmethod
+    def assert_routing_diversity(g_mem: Tensor, cfg: FieldConfig) -> None:
+        ent = float(-(g_mem * (g_mem + cfg.eps).log()).sum().item())
+        assert ent >= cfg.eps_routing_ent, \
+            f"FM5 GUARD: routing entropy={ent:.4f} < {cfg.eps_routing_ent:.4f} (routing collapse)"

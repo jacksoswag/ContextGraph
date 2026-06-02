@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest, torch
 from torch import Tensor
 from field.config import FieldConfig
-from field.dynamics import FieldModel, FieldState, field_step, Actuators
+from field.dynamics import FieldModel, FieldState, field_step, Actuators, assert_field_diversity
 from field.spaces import Episode
 from field.kernel import compute_phi, masked_phi
 from field.memory import update_memory, assert_memory_norm, init_episode_memory
@@ -151,18 +151,21 @@ def test_failure_mode_1_phi_saturation():
 
 
 def test_failure_mode_2_memory_dominance():
-    # FM2: m_t dominance → global attractor freezing (all X converge to same direction)
-    cfg = _cfg(m_ref=100.0, eps_m=0.1)   # huge m_ref amplifies memory term
+    # FM2: m_t dominance → global attractor freezing → assert_field_diversity fires.
+    # Provoke: identical X rows (all nodes collapsed to same direction).
+    cfg = _cfg(eps_field_diversity=1e-5)
     N, d = 4, cfg.d_lat
-    X = torch.randn(N, d); X = X / (X.norm(dim=-1, keepdim=True) + 1e-8)
-    m = torch.ones(d)   # dominant memory direction
-    P_slow = torch.zeros(d, cfg.d_anchor)   # [d_lat, d_anchor] — correct shape
-    ep = _episode(N, cfg.d_anchor)
-    phi = compute_phi(X, ep.A, m * 100.0, P_slow, cfg)
-    # All rows of phi should be nearly identical → frozen attractor
-    row_var = float(phi.var(dim=-1).mean().item())
-    # Detector: per-row variance is near-zero
-    assert row_var < 0.5, f"Expected low row variance under memory dominance, got {row_var}"
+    # Collapsed field: all nodes have identical latent
+    X_collapsed = torch.ones(N, d) / (d ** 0.5)   # all rows identical → var=0
+    with pytest.raises(AssertionError, match="FM2 GUARD"):
+        assert_field_diversity(X_collapsed, cfg)
+
+def test_failure_mode_2_passes_with_diverse_field():
+    # Inverse: diverse X rows → FM2 guard does not fire
+    cfg = _cfg(eps_field_diversity=1e-5)
+    N, d = 4, cfg.d_lat
+    X_diverse = torch.randn(N, d)
+    assert_field_diversity(X_diverse, cfg)   # should not raise
 
 
 def test_failure_mode_3_reachability_explosion():
@@ -191,25 +194,21 @@ def test_failure_mode_4_mdl_over_penalty():
 
 
 def test_failure_mode_5_routing_collapse():
-    # FM5: routing collapse → single-path degeneration (all g_mem mass on one node)
-    cfg = _cfg()
-    router = FieldRouter(cfg)
+    # FM5: routing collapse → assert_routing_diversity fires on a manually collapsed g_mem.
+    cfg = _cfg(eps_routing_ent=0.1)
     N = 8
-    X = torch.zeros(N, cfg.d_lat)
-    X[0] = 1.0   # one dominant node with large norm
-    ep = _episode(N, cfg.d_anchor)
-    # Build simple phi_masked (identity + neighbors)
-    phi_m = torch.eye(N) * 0.5
-    alpha, g_mem, score = router(X, phi_m)
-    # Routing collapse: one node gets nearly all mass
-    max_mass = float(g_mem.max().item())
-    # Detector: max(g_mem) close to 1 signals collapse
-    if max_mass > 0.9:
-        assert max_mass > 0.9, f"Routing collapsed to single node: mass={max_mass:.3f}"
-    # The guard is: assert diversity in g_mem (e.g., entropy > threshold)
-    ent = float(-(g_mem * (g_mem + 1e-8).log()).sum().item())
-    # In a collapsed case entropy is near 0 — no hard guard fires here, diagnostic only
-    assert ent >= 0.0   # always non-negative
+    # Collapsed: one node takes all mass
+    g_collapsed = torch.zeros(N)
+    g_collapsed[0] = 1.0
+    with pytest.raises(AssertionError, match="FM5 GUARD"):
+        FieldRouter.assert_routing_diversity(g_collapsed, cfg)
+
+def test_failure_mode_5_passes_with_diverse_routing():
+    # Inverse: uniform g_mem → FM5 guard does not fire
+    cfg = _cfg(eps_routing_ent=0.1)
+    N = 8
+    g_uniform = torch.ones(N) / N   # uniform → max entropy
+    FieldRouter.assert_routing_diversity(g_uniform, cfg)   # should not raise
 
 
 # ── Forward-pass ordering (§10 completeness) ──────────────────────────────────

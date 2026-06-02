@@ -56,5 +56,9 @@ class FieldConfig:
     sleep_on_thresh: float = 0.7       # Sleep trigger hysteresis ON threshold
     sleep_off_thresh: float = 0.3      # Sleep trigger hysteresis OFF threshold
 
+    # §10 failure mode guard thresholds (named constants, not open axes)
+    eps_field_diversity: float = 1e-5  # FM2: min per-row variance of X (attractor freeze)
+    eps_routing_ent: float = 0.1       # FM5: min entropy of g_mem (routing collapse)
+
 # Singleton default used when callers don't supply a config.
 DEFAULT_CFG = FieldConfig()
