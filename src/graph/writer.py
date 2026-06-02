@@ -6,7 +6,7 @@ from __future__ import annotations
 # outer edge stores the inner edge's `e_` id as its endpoint — the field reads
 # hyperedge-ness straight from the id namespace. Same normalized text → same id, so
 # re-ingesting identical content bumps `count` instead of duplicating rows.
-import hashlib, sqlite3, time
+import hashlib, os, sqlite3, time
 from pathlib import Path
 from ingest.labels import normalize_label
 from embed import embed_batch, EMBED_DIM
@@ -38,8 +38,11 @@ _EVENT = "[event]"
 
 
 class GraphWriter:
-    def __init__(self, path: str | Path) -> None:
+    # live: collapse near-duplicate new nodes at write time (DI_LIVE_MERGE) using the same
+    # scorer as the batch sleep pass. Default off — batch merge is the source of truth.
+    def __init__(self, path: str | Path, *, live: bool | None = None) -> None:
         self.path = str(path)
+        self._live = (os.getenv("DI_LIVE_MERGE", "0") == "1") if live is None else live
         self._con = sqlite3.connect(self.path)
         self._vec = False
         if sqlite_vec is not None:
@@ -93,11 +96,15 @@ class GraphWriter:
         for c in clauses: self._commit(c, nodes, edges)
         now = int(time.time())
         con = self._con
-        n_new = self._upsert_nodes(nodes, now)
+        new_node_ids = self._upsert_nodes(nodes, now)
         e_new = self._upsert_edges(edges, now)
         con.commit()
+        merged = 0
+        if self._live and new_node_ids and self._vec:
+            from graph.merge import merge_nodes, MergeConfig
+            merged = merge_nodes(con, new_node_ids, MergeConfig())["merged"]; con.commit()
         hyper = sum(1 for s, _r, t, _sc, _sf in edges.values() if s.startswith("e_") or t.startswith("e_"))
-        return {"nodes": n_new, "edges": e_new, "hyperedges": hyper,
+        return {"nodes": len(new_node_ids), "edges": e_new, "hyperedges": hyper, "merged": merged,
                 "nodes_seen": len(nodes), "edges_seen": len(edges)}
 
     def _existing(self, table: str, ids: list[str]) -> set[str]:
@@ -108,8 +115,8 @@ class GraphWriter:
             out.update(r[0] for r in self._con.execute(q, chunk))
         return out
 
-    def _upsert_nodes(self, nodes: dict, now: int) -> int:
-        if not nodes: return 0
+    def _upsert_nodes(self, nodes: dict, now: int) -> list[str]:
+        if not nodes: return []
         ids = list(nodes)
         existing = self._existing("nodes", ids)
         new_ids = [i for i in ids if i not in existing]
@@ -124,7 +131,7 @@ class GraphWriter:
         if existing:
             self._con.executemany("UPDATE nodes SET count=count+1, updated_at=? WHERE id=?",
                                   [(now, i) for i in existing])
-        return len(new_ids)
+        return new_ids
 
     def _upsert_edges(self, edges: dict, now: int) -> int:
         if not edges: return 0
