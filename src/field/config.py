@@ -16,7 +16,8 @@ class FieldConfig:
     N_max: int = 512               # active-set node cap, by descending edge weight (§3.1)
     # decay: per-node leak λ‖x‖² on non-anchored rows (PPR-teleport analogue, 📍1 decision) —
     # makes the settled fixed point localize instead of over-spreading to global co-activation.
-    decay: float = 1.5             # leak strength λ (locality knob; precise value = 📍3)
+    decay: float = 1.5             # leak strength λ (locality knob; 📍3-fixed default)
+    k_inherit: int = 4             # parent-mesh nodes inherited as child anchors (§5)
     # support / mesh / stabilization (§3.5)
     tau_support: float = 0.5       # mesh threshold τ (support_τ)
     d_mesh: float = 0.3            # Jaccard distance for mesh clustering

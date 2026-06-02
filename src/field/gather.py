@@ -81,14 +81,15 @@ def seed_init(ep: Episode, seed_idx: list[int], C: Coupling, cfg: FieldConfig, r
     return X0, P
 
 # build_anchor: pin seeds to their hot init; optionally pin inherited (parent) rows to parent state
-# (§3.3, §5). The anchor potential keeps E a Lyapunov function while tying the gather to its seeds.
+# (§3.3, §5). `inherited_target` is a full [N,d] tensor (the masked rows are copied). The anchor
+# potential keeps E a Lyapunov function while tying the gather to its seeds (and to the parent).
 def build_anchor(ep: Episode, seed_idx: list[int], X0: Tensor, cfg: FieldConfig,
                  inherited_idx: list[int] | None = None, inherited_target: Tensor | None = None) -> Anchor:
     N, d = len(ep.node_ids), cfg.d
     mask = torch.zeros(N); target = torch.zeros(N, d)
     mask[seed_idx] = 1.0; target[seed_idx] = X0[seed_idx]
     if inherited_idx:
-        mask[inherited_idx] = 1.0; target[inherited_idx] = inherited_target
+        mask[inherited_idx] = 1.0; target[inherited_idx] = inherited_target[inherited_idx]
     return Anchor(mask=mask, target=target)
 
 # gather: the one physics op — seed-anchored convergent settle over a materialized Episode (§3).
