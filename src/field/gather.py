@@ -92,19 +92,30 @@ def build_anchor(ep: Episode, seed_idx: list[int], X0: Tensor, cfg: FieldConfig,
         mask[inherited_idx] = 1.0; target[inherited_idx] = inherited_target[inherited_idx]
     return Anchor(mask=mask, target=target)
 
+# edge_weights: resolve a Sleep-learned per-edge multiplier tensor [E] for this episode (default 1).
+# `weights` exposes .get(u_id, v_id) → multiplier; None ⇒ bootstrap coupling.
+def edge_weights(ep: Episode, weights) -> Tensor | None:
+    if weights is None: return None
+    s, d = ep.edge_index
+    nid = ep.node_ids
+    return torch.tensor([weights.get(nid[a], nid[b]) for a, b in zip(s.tolist(), d.tolist())],
+                        dtype=torch.float32)
+
 # gather: the one physics op — seed-anchored convergent settle over a materialized Episode (§3).
 def gather(ep: Episode, seed_idx: list[int], cfg: FieldConfig, rng_seed: int = 0,
-           inherited_idx: list[int] | None = None, inherited_target: Tensor | None = None) -> GatherResult:
-    C, cfg = safe_build(ep, cfg)
+           inherited_idx: list[int] | None = None, inherited_target: Tensor | None = None,
+           weights=None) -> GatherResult:
+    C, cfg = safe_build(ep, cfg, edge_weights(ep, weights))
     X0, _ = seed_init(ep, seed_idx, C, cfg, rng_seed)
     anc = build_anchor(ep, seed_idx, X0, cfg, inherited_idx, inherited_target)
     Xh, Eh = rollout(X0, C, cfg, anc)
     return GatherResult(Xh[-1], Xh, Eh, ep, C, cfg, list(seed_idx), Xh.shape[0] - 1)
 
 # gather_from_store: materialize the active set from S, then settle (§3.1 + §3).
-def gather_from_store(store: _StoreProto, seed_ids: list[str], cfg: FieldConfig, rng_seed: int = 0) -> GatherResult:
+def gather_from_store(store: _StoreProto, seed_ids: list[str], cfg: FieldConfig, rng_seed: int = 0,
+                      weights=None) -> GatherResult:
     ep, seed_idx = materialize(store, seed_ids, cfg)
-    return gather(ep, seed_idx, cfg, rng_seed)
+    return gather(ep, seed_idx, cfg, rng_seed, weights=weights)
 
 # Mesh: the gather readout (spec §3.5) — relevance-ranked nodes + a seed-rooted provenance tree
 # giving every gathered concept a citation chain back to a seed.

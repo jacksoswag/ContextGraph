@@ -59,8 +59,8 @@ def make_two_incomm_rings(r1: int = 5, r2: int = 7, seed: int = 42) -> Episode:
     return Episode(ids, _anchors([r1, r2], seed=seed), _ei(edges), {v: i for i, v in enumerate(ids)})
 
 # ── safe coupling build: adjusts η if above L-derived bound (§3.4) ────────────────
-def safe_build(ep: Episode, cfg: FieldConfig) -> tuple[Coupling, FieldConfig]:
-    C = build_coupling(ep, dataclasses.replace(cfg, eta=1e-10))  # probe to get eta_bound
+def safe_build(ep: Episode, cfg: FieldConfig, edge_w=None) -> tuple[Coupling, FieldConfig]:
+    C = build_coupling(ep, dataclasses.replace(cfg, eta=1e-10), edge_w)  # probe to get eta_bound
     safe_eta = min(cfg.eta, C.eta_bound * 0.9)
     return C, (cfg if safe_eta >= cfg.eta else dataclasses.replace(cfg, eta=safe_eta))
 

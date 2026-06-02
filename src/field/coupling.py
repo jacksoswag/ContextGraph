@@ -14,13 +14,16 @@ class Coupling:
     L: float         # Lipschitz bound ‖C_sym‖ + β²·R_max² + 3μ·R_max²
     eta_bound: float # 1.9/L — safe step-size ceiling
 
-# build: construct C_sym from episode embeddings; stores λmax, R_max, L, η_bound (spec §3.3–3.4)
-def build(ep: Episode, cfg: FieldConfig) -> Coupling:
+# build: construct C_sym from episode embeddings; stores λmax, R_max, L, η_bound (spec §3.3–3.4).
+# edge_w ([E], optional): Sleep-learned per-edge multiplier on the cosine coupling (support stays
+# E(S) — multiplies existing edges only, never creates them; §6).
+def build(ep: Episode, cfg: FieldConfig, edge_w: Tensor | None = None) -> Coupling:
     N = len(ep.node_ids)
     src, dst = ep.edge_index[0], ep.edge_index[1]
     # cosine similarities for all edges (vectorized)
     A_norm = F.normalize(ep.A.float(), dim=-1)
     cos_sim = (A_norm[src] * A_norm[dst]).sum(-1)   # [E]
+    if edge_w is not None: cos_sim = cos_sim * edge_w
     # build symmetric weight matrix masked to E(S)
     sym_raw = torch.zeros(N, N)
     sym_raw[src, dst] = cos_sim
