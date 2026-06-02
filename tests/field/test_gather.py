@@ -178,3 +178,77 @@ def test_gather_deterministic():
     a = gather(ep, seed_idx, cfg, rng_seed=0).X_star
     b = gather(ep, seed_idx, cfg, rng_seed=0).X_star
     assert torch.equal(a, b)
+
+
+# ── Phase 2: mesh + provenance tree readout (§3.5) ──────────────────────────────────
+
+from field.gather import build_mesh, Mesh
+from field.episode import Episode
+from field.coupling import Coupling
+
+# Diamond s0→{a,b}→c, hand-set X*/C so flow- and shortest-path provenance DISAGREE on c's parent:
+#   rel = s0:9 a:4 b:2.25 c:1 (all in mesh). c reachable from a (idx1) and b (idx2) at hop2.
+#   flow(i,c)=C[i,c]·⟨x_i,x_c⟩ :  a→0.3·2=0.6 ,  b→0.6·0=0   ⇒ FLOW picks a
+#   shortest key = C[i,c]       :  a→0.3       ,  b→0.6       ⇒ SHORTEST picks b
+def _diamond_result():
+    ids = ["s0", "a", "b", "c"]
+    edges = [(0, 1), (1, 0), (0, 2), (2, 0), (1, 3), (3, 1), (2, 3), (3, 2)]
+    ei = torch.tensor(list(zip(*edges)), dtype=torch.long)
+    ep = Episode(ids, torch.zeros(4, 384), ei, {n: i for i, n in enumerate(ids)})
+    Xs = torch.tensor([[3.0, 0.0], [2.0, 0.0], [0.0, 1.5], [1.0, 0.0]])   # b orthogonal to c
+    sym = torch.zeros(4, 4)
+    for i, j, w in [(0, 1, 0.5), (0, 2, 0.5), (1, 3, 0.3), (2, 3, 0.6)]:
+        sym[i, j] = w; sym[j, i] = w
+    C = Coupling(sym=sym, lambda_max=1.0, R_max=10.0, L=1.0, eta_bound=0.1)
+    return GatherResult(Xs, Xs.unsqueeze(0), torch.zeros(1), ep, C, DEFAULT_CFG, [0], 0)
+
+def test_mesh_tree_rooted_acyclic_spans():
+    m = build_mesh(_diamond_result(), tau_rel=0.01, provenance="flow")
+    assert set(m.nodes) == {0, 1, 2, 3}                 # all 4 nodes selected & reachable
+    assert m.parent[0] == -1 and m.seed_roots == [0]    # rooted at the seed
+    # every node has a path to the seed (acyclic, spanning)
+    for i in m.nodes:
+        ch = m.chain(i)
+        assert ch[0] == 0 and ch[-1] == i and len(set(ch)) == len(ch)
+    # parent is always in a strictly-lower layer (tree, no same-layer/back edges)
+    for i, p in m.parent.items():
+        if p != -1: assert m.layer[p] < m.layer[i]
+
+def test_mesh_layers_match_hop_distance():
+    m = build_mesh(_diamond_result(), tau_rel=0.01, provenance="flow")
+    assert m.layer == {0: 0, 1: 1, 2: 1, 3: 2}
+
+def test_mesh_flow_vs_shortest_parent_differs():
+    flow = build_mesh(_diamond_result(), tau_rel=0.01, provenance="flow")
+    short = build_mesh(_diamond_result(), tau_rel=0.01, provenance="shortest")
+    assert flow.parent[3] == 1, "flow should attach c to a (max C·⟨x,x⟩)"
+    assert short.parent[3] == 2, "shortest should attach c to b (max structural edge)"
+
+def test_mesh_citation_chain_renders_ids():
+    m = build_mesh(_diamond_result(), tau_rel=0.01, provenance="flow")
+    assert m.chain_ids(3) == ["s0", "a", "c"]           # seed→…→node, as S ids
+
+def test_mesh_nodes_relevance_ranked():
+    m = build_mesh(_diamond_result(), tau_rel=0.01, provenance="flow")
+    rels = [m.relevance[i] for i in m.nodes]
+    assert rels == sorted(rels, reverse=True)           # descending relevance order
+    assert m.nodes[0] == 0                              # seed is most relevant
+
+def test_mesh_top_k_caps_but_keeps_seed():
+    m = build_mesh(_diamond_result(), tau_rel=0.01, top_k=2, provenance="flow")
+    assert 0 in m.nodes and len(m.nodes) <= 2
+
+def test_mesh_deterministic():
+    a = build_mesh(_diamond_result(), provenance="flow")
+    b = build_mesh(_diamond_result(), provenance="flow")
+    assert a.nodes == b.nodes and a.parent == b.parent and a.layer == b.layer
+
+# real gather: the mesh tree spans, is rooted, and every node cites back to a seed
+def test_mesh_on_real_line_gather():
+    store, _ = _line_store()
+    cfg = _cfg(k_hop=4, N_max=512)
+    res = gather(*materialize(store, ["s0"], cfg), cfg)
+    m = build_mesh(res, tau_rel=0.02, provenance="flow")
+    assert m.seed_roots == res.seed_idx
+    for i in m.nodes:
+        assert m.chain(i)[0] in m.seed_roots            # citation reaches a seed root

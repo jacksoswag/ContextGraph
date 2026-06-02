@@ -105,6 +105,65 @@ def gather_from_store(store: _StoreProto, seed_ids: list[str], cfg: FieldConfig,
     ep, seed_idx = materialize(store, seed_ids, cfg)
     return gather(ep, seed_idx, cfg, rng_seed)
 
+# Mesh: the gather readout (spec §3.5) — relevance-ranked nodes + a seed-rooted provenance tree
+# giving every gathered concept a citation chain back to a seed.
+@dataclass
+class Mesh:
+    nodes: list[int]               # mesh node indices into ep, relevance-descending
+    node_ids: list[str]            # corresponding S node-ids
+    relevance: dict[int, float]    # idx → r_i = ‖x*_i‖²
+    parent: dict[int, int]         # idx → provenance parent idx; seed roots → -1
+    layer: dict[int, int]          # idx → hop layer in the provenance tree
+    seed_roots: list[int]          # seed indices (tree roots)
+    def chain(self, i: int) -> list[int]:    # seed→…→i citation chain (indices)
+        out = [i]
+        while self.parent[out[-1]] != -1: out.append(self.parent[out[-1]])
+        return list(reversed(out))
+    def chain_ids(self, i: int) -> list[str]:    # same chain as S node-ids
+        m = dict(zip(self.nodes, self.node_ids))
+        return [m[j] for j in self.chain(i)]
+
+# build_mesh: select the relevance-ranked mesh (soft/top-k, per 📍1 — τ=0.5 collapses to seed-only)
+# and grow a seed-rooted spanning tree over it. provenance="flow" (parent = max
+# C_sym[i,j]·⟨x*_i,x*_j⟩ lower-layer neighbor, spec §3.5 default) or "shortest" (max structural
+# edge weight C_sym among min-hop neighbors). Nodes unreachable through the mesh are dropped.
+def build_mesh(res: GatherResult, tau_rel: float = 0.01, top_k: int | None = None,
+               provenance: str = "flow") -> Mesh:
+    rel = res.relevance(); mx = float(rel.max()); N = len(res.ep.node_ids)
+    seeds = list(res.seed_idx)
+    if mx <= 0:
+        return Mesh(list(seeds), [res.ep.node_ids[i] for i in seeds],
+                    {i: 0.0 for i in seeds}, {i: -1 for i in seeds}, {i: 0 for i in seeds}, seeds)
+    sel = {i for i in range(N) if float(rel[i]) >= tau_rel * mx} | set(seeds)
+    if top_k is not None:
+        ranked = sorted(sel, key=lambda i: (-float(rel[i]), i))[: max(top_k, len(seeds))]
+        sel = set(ranked) | set(seeds)
+    # induced adjacency on the selected set
+    adj: dict[int, list[int]] = {i: [] for i in sel}
+    s, d = res.ep.edge_index
+    for a, b in zip(s.tolist(), d.tolist()):
+        if a in sel and b in sel: adj[a].append(b)
+    Csym, Xs = res.C.sym, res.X_star
+    def key(i: int, j: int) -> float:
+        w = float(Csym[i, j])
+        return w * float((Xs[i] * Xs[j]).sum()) if provenance == "flow" else w
+    # layered BFS from seeds; each node attaches to its best-key strictly-lower-layer neighbor
+    parent: dict[int, int] = {}; layer: dict[int, int] = {}; visited: set[int] = set()
+    for sd in seeds:
+        if sd in sel: parent[sd] = -1; layer[sd] = 0; visited.add(sd)
+    cur = 0
+    while True:
+        nxt = []
+        for j in sorted(sel - visited):
+            lower = [i for i in adj[j] if i in visited]
+            if lower:
+                parent[j] = max(lower, key=lambda i: (key(i, j), -i)); layer[j] = cur + 1; nxt.append(j)
+        if not nxt: break
+        visited.update(nxt); cur += 1
+    nodes = sorted(visited, key=lambda i: (-float(rel[i]), i))
+    return Mesh(nodes, [res.ep.node_ids[i] for i in nodes],
+                {i: float(rel[i]) for i in nodes}, parent, layer, list(seeds))
+
 # hop_distances: graph distance (in E(S)∩N) from the nearest seed for every node — for the
 # locality invariant (mesh ⊆ k-hop) and the relevance-by-hop readout. Unreachable ⇒ -1.
 def hop_distances(ep: Episode, seed_idx: list[int]) -> list[int]:
