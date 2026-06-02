@@ -80,6 +80,8 @@ def solve(task, seed_ids, parent, depth, store, cfg, llm, budget) -> TreeNode:
     children: list[TreeNode] = []
     for st in (subtasks or []):
         if budget.exhausted(): break
+        # each child re-interprets its sub-task → grounds the sub-task's own entities (diversifies
+        # when sub-tasks introduce new entities; keeps all relevant concepts for same-entity ones).
         sub = interpret(st, store, llm=llm); budget.llm_calls += 1
         child = solve(st, sub["seeds"] or seed_ids, (mesh, res), depth + 1, store, cfg, llm, budget)
         children.append(child)
