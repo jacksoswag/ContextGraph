@@ -1,0 +1,4 @@
+{"id":"adversarial.echo.001","category":"adversarial","prompt":"The moon stores invoices.","memory_facts":[],"expected_empty":true,"forbidden_terms":["moon","invoices"]}
+{"id":"adversarial.question.001","category":"adversarial","prompt":"What does unsupported nebula have?","memory_facts":[],"expected_empty":true,"forbidden_terms":["unsupported nebula"]}
+{"id":"adversarial.prompt_context.001","category":"adversarial","prompt":"Dogs have wings.","memory_facts":[["dogs","have","fur"]],"expected_facts":[["dogs","have","fur"]],"expected_targets":["fur"],"forbidden_terms":["wings"]}
+{"id":"adversarial.relation_only.001","category":"adversarial","prompt":"What is a boot?","memory_facts":[["boot","is a","shoe"],["planet","is a","body"],["program","is a","software"]],"expected_facts":[["boot","is a","shoe"]],"expected_targets":["shoe"],"forbidden_terms":["body","software"]}
