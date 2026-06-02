@@ -79,12 +79,14 @@ def adaptive_gather(ctx: TreeContext, seed_ids: list[str], cfg: FieldConfig = DE
                     dcfg: DomainConfig = DomainConfig(), rng_seed: int = 0) -> DomainResult:
     seed_set = list(dict.fromkeys(seed_ids))
     live: set[str] = set(seed_set)
-    for s in seed_set:                                  # seed the front with the seeds' 1-hop
-        live |= {n for n, _ in ctx.neighbors(s)}
     committed: dict[str, float] = {}                    # OUTPUT: ever-hot id → best r (accumulates)
     commit_phase: dict[str, int] = {s: -1 for s in seed_set}    # for the TTL baton
     state: dict[str, Tensor] = {}                       # settled vector per CURRENTLY-LIVE node (warm-start + re-anchor)
     parent: dict[str, str] = {s: s for s in seed_set}
+    for s in seed_set:                                  # seed the front with the seeds' 1-hop
+        for n, _ in ctx.neighbors(s):
+            live.add(n)
+            if n not in parent: parent[n] = s          # provenance: 1-hop nodes parented to their seed
     just_culled: set[str] = set()
     trace: list[dict] = []; peak = 0; total_loaded = 0
 
