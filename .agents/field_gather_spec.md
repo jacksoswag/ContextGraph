@@ -59,6 +59,14 @@ solve(task, seeds, parent_mesh, depth):
   anchor embedding** `a_v ∈ ℝ^384` (from `src/embed.py`). Edges `E(S)` carry weight + relation,
   produced by `src/ingest/` (text→triple producer).
 - `S` is **immutable at runtime**; plastic only in Sleep (§6). The gather reads `S`, never writes.
+- **HYPEREDGES [approved deviation 2026-06-02].** `S` is hyperedge-native: every edge is reified as
+  a first-class `e_`-id entity with its own anchor (`edges.info_vector`); an edge endpoint may be a
+  node (`n_`) or another edge (`e_`) — the field reads hyperedge-ness from the id namespace, it does
+  not distinguish. A reified edge's **children** = its `(source_id, target_id)`. `materialize` pulls
+  a reified edge's children into the active set (they may be unreachable by k-hop) and records
+  `Episode.hyperedges` member groups; the mesh provenance tree routes through them. This re-derives
+  the hyperedge structure dropped at the G3 prune (`7a8eeaa`), but re-expressed for the convergent
+  Lyapunov field (NOT the retired `Π_S` projection). See §3.3 containment term.
 
 ---
 
@@ -86,6 +94,14 @@ E(X) = −½ Σ_ij C_sym[i,j]⟨x_i,x_j⟩            # couple   : spread activa
 ```
 - `C_sym` = degree-normalized cosine coupling on `E(S)∩N` (reuse `coupling.build`'s sym path),
   Sleep-shapeable (§6). **`C_anti` is removed entirely.**
+- **HYPEREDGE CONTAINMENT [approved deviation 2026-06-02].** `+ w_hyper·Σ_{e} Σ_{i,j∈M(e), i≠j}
+  ⟨x_i,x_j⟩` — a clique attraction among each reified edge's members `M(e)={e, src(e), tgt(e)}`,
+  so energy stays within a hyperedge (the fact moves as a unit). Added to `C_sym` **after** degree
+  normalization (folding it in before would inflate members' degrees and dilute the parent edge's
+  own coupling, collapsing the fact's relevance — measured). It is a symmetric quadratic form ⇒ `E`
+  stays a Lyapunov function; `L`/`R_max`/`η` are computed on the final `sym`, so convergence/safety
+  are preserved. `w_hyper=0` ⇒ flat dyadic (pre-hyperedge); default `0.5` (content co-activates,
+  seed stays hottest). Validated: content recall `0.0→1.0` (`scripts/hyperedge_eval.py`).
 - The **anchor term is a true potential** ⇒ `E` stays a Lyapunov function ⇒ convergence is
   preserved while the gather is pinned to the seeds (and to parent state, §5). `s_i` = the seed
   init state for seed anchors, the parent's settled `x*_i` for inherited anchors.

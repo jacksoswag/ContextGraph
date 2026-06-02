@@ -14,6 +14,13 @@ class FieldConfig:
     c_seed: float = 0.7            # seed hot-init fraction of R_max (§3.2)
     k_hop: int = 2                 # active-set radius from seeds (§3.1)
     N_max: int = 512               # active-set node cap, by descending edge weight (§3.1)
+    # hyperedge containment: extra coupling binding a reified edge (e_ id) to its child
+    # endpoints, so energy stays within a hyperedge when it has children. 0 ⇒ flat dyadic
+    # (pre-hyperedge behavior). Added AFTER degree-norm as a clique among members → reuses
+    # the Lyapunov L/R_max/η machinery (re-derives the dropped-at-G3 containment term). 0.5
+    # balances: the fact's content co-activates while the seed stays hottest; ≥1.0 lets
+    # children eclipse the seed (measured in scripts/hyperedge_eval.py).
+    w_hyper: float = 0.5
     # decay: per-node leak λ‖x‖² on non-anchored rows (PPR-teleport analogue, 📍1 decision) —
     # makes the settled fixed point localize instead of over-spreading to global co-activation.
     decay: float = 1.5             # leak strength λ (locality knob; 📍3-fixed default)

@@ -47,11 +47,33 @@ def materialize(store: _StoreProto, seed_ids: list[str], cfg: FieldConfig) -> tu
                 weight[v] = max(weight.get(v, 0.0), sc)
                 if v not in seen: seen.add(v); nxt.append(v)
         frontier.extend(nxt)
+    # hyperedge children: a reified edge (e_ id) in the active set binds its child
+    # endpoints. Pull them in (pinned) so the fact's content materializes even when it
+    # is unreachable by k-hop. Nested edges expand transitively.
+    _children = getattr(store, "children", None)
+    if _children is not None:
+        he_queue = [n for n in seen if n.startswith("e_")]
+        while he_queue:
+            kids = _children(he_queue.pop())
+            for c in kids or ():
+                weight[c] = math.inf
+                if c not in seen:
+                    seen.add(c)
+                    if c.startswith("e_"): he_queue.append(c)
     # cap: seeds always kept; fill remaining slots with highest-weight non-seeds
     others = sorted((n for n in seen if n not in set(seeds)),
                     key=lambda n: (-weight[n], n))
     keep = seeds + others[: max(0, cfg.N_max - len(seeds))]
     idx = {n: i for i, n in enumerate(keep)}
+    # hyperedge groups over the kept set: (member_indices, weight) for each reified edge
+    # whose child endpoints are both present — coupling.build clique-binds them.
+    hyperedges: list[tuple[list[int], float]] = []
+    if _children is not None:
+        for n in keep:
+            if not n.startswith("e_"): continue
+            kids = _children(n)
+            if kids and kids[0] in idx and kids[1] in idx:
+                hyperedges.append(([idx[n], idx[kids[0]], idx[kids[1]]], 1.0))
     # anchors A [N,384] (fallback centroid for nodes lacking a stored vector)
     def _anc(n):
         v = store.anchor(n)
@@ -67,7 +89,8 @@ def materialize(store: _StoreProto, seed_ids: list[str], cfg: FieldConfig) -> tu
     src: list[int] = []; dst: list[int] = []
     for a, b in und: src += [a, b]; dst += [b, a]
     edge_index = torch.tensor([src, dst], dtype=torch.long) if src else torch.zeros(2, 0, dtype=torch.long)
-    ep = Episode(node_ids=keep, A=torch.from_numpy(A), edge_index=edge_index, id_to_idx=idx)
+    ep = Episode(node_ids=keep, A=torch.from_numpy(A), edge_index=edge_index, id_to_idx=idx,
+                 hyperedges=hyperedges)
     return ep, list(range(len(seeds)))
 
 # seed_init: X_0 directions = rownorm(P·A); seeds hot (R_max·c_seed), non-seeds cool ~0 (§3.2).
@@ -150,11 +173,18 @@ def build_mesh(res: GatherResult, tau_rel: float = 0.01, top_k: int | None = Non
     if top_k is not None:
         ranked = sorted(sel, key=lambda i: (-float(rel[i]), i))[: max(top_k, len(seeds))]
         sel = set(ranked) | set(seeds)
-    # induced adjacency on the selected set
+    # induced adjacency on the selected set — dyadic edges PLUS hyperedge cliques, so a
+    # reified fact's content can be cited through the edge it belongs to (the mesh parses
+    # e_ endpoints the same way materialize does).
     adj: dict[int, list[int]] = {i: [] for i in sel}
     s, d = res.ep.edge_index
     for a, b in zip(s.tolist(), d.tolist()):
         if a in sel and b in sel: adj[a].append(b)
+    for members, _w in res.ep.hyperedges:
+        present = [m for m in members if m in sel]
+        for a in present:
+            for b in present:
+                if a != b: adj[a].append(b)
     Csym, Xs = res.C.sym, res.X_star
     def key(i: int, j: int) -> float:
         w = float(Csym[i, j])

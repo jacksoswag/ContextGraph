@@ -32,6 +32,17 @@ def build(ep: Episode, cfg: FieldConfig, edge_w: Tensor | None = None) -> Coupli
     deg = sym_raw.abs().sum(-1)                      # [N]
     d_inv = torch.where(deg > 0, deg.rsqrt(), torch.zeros(N))
     sym = d_inv.unsqueeze(-1) * sym_raw * d_inv.unsqueeze(0)
+    # hyperedge containment: clique-couple each reified edge's members so energy stays
+    # within the hyperedge. Added AFTER normalization (a direct, undiluted attraction) —
+    # folding it into the degree norm would inflate members' degrees and dilute the
+    # parent edge's own coupling, collapsing the fact's relevance. Still a symmetric
+    # potential ⇒ E stays Lyapunov; L/R_max below are computed on the final `sym`.
+    if cfg.w_hyper > 0.0 and ep.hyperedges:
+        for members, w_e in ep.hyperedges:
+            for a in range(len(members)):
+                for b in range(a + 1, len(members)):
+                    i, j = members[a], members[b]
+                    sym[i, j] += cfg.w_hyper * w_e; sym[j, i] += cfg.w_hyper * w_e
     # derived quantities stored on Coupling
     lam_max = float(torch.linalg.eigvalsh(sym).max().clamp(min=1e-6))
     R_max = math.sqrt(lam_max / cfg.mu)
