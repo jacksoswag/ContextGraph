@@ -32,7 +32,9 @@ def build(ep: Episode, cfg: FieldConfig) -> Coupling:
     # derived quantities stored on Coupling
     lam_max = float(torch.linalg.eigvalsh(sym).max().clamp(min=1e-6))
     R_max = math.sqrt(lam_max / cfg.mu)
-    L = float(sym.norm()) + cfg.beta ** 2 * R_max ** 2 + 3.0 * cfg.mu * R_max ** 2
+    # L includes the anchor (σ·I) and decay (λ·I) Hessians so η stays safe with both §3.3 potentials
+    L = (float(sym.norm()) + cfg.beta ** 2 * R_max ** 2 + 3.0 * cfg.mu * R_max ** 2
+         + max(cfg.sigma_anchor, cfg.decay))
     eta_bound = 1.9 / max(L, 1e-8)
     assert cfg.eta <= eta_bound, f"η={cfg.eta} exceeds L-derived bound {eta_bound:.4f} (L={L:.2f})"
     return Coupling(sym=sym, lambda_max=lam_max, R_max=R_max, L=L, eta_bound=eta_bound)
