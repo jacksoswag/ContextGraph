@@ -58,6 +58,33 @@ def _tokenize(s: str) -> list[str]:
 def _numeric_tokens(s: str) -> frozenset:
     return frozenset(re.findall(r'\d+', _norm_text(s)))
 
+# function words whose presence/absence never distinguishes two entities (vs content words)
+_STOP = frozenset(
+    "a an the of in on at to for from by with as is are was were be been being and or but "
+    "s this that these those it he she they his her their its".split())
+
+# morphological variants ("landing"/"landings", "color"/"colour") count as the same slot
+def _same_stem(a: str, b: str) -> bool:
+    if a.startswith(b) or b.startswith(a): return True
+    lcp = 0
+    for x, y in zip(a, b):
+        if x != y: break
+        lcp += 1
+    return lcp >= 3 and lcp >= max(len(a), len(b)) - 2
+
+# Distinct-entity signal for NODES: two surfaces that share a template but differ in exactly one
+# content-word slot ("north korea"/"south korea", "22 june"/"22 july", "united states"/"…kingdom")
+# are distinct even at high cosine. Not applied to edge predicates, where one-token differences are
+# usually synonyms ("galaxy begin"/"galaxy start") we DO want merged.
+def _discriminative_conflict(a: str, b: str) -> bool:
+    sa, sb = set(_tokenize(a)), set(_tokenize(b))
+    only_a, only_b = sa - sb, sb - sa
+    if len(only_a) != 1 or len(only_b) != 1 or not (sa & sb): return False
+    wa, wb = next(iter(only_a)), next(iter(only_b))
+    if wa in _STOP and wb in _STOP: return False     # function-word slot ("of"/"s") ⇒ same entity
+    if _same_stem(wa, wb): return False              # morphological variant ⇒ same entity
+    return True                                      # content-word slot differs ⇒ distinct
+
 # ── BM25 (BM25+ variant: idf floored positive so common tokens still contribute) ───────────────
 def _build_idf(con: sqlite3.Connection) -> tuple[dict[str, float], float]:
     docs = [r[0] for r in con.execute("SELECT text FROM nodes WHERE text IS NOT NULL").fetchall()]
@@ -158,8 +185,8 @@ def _specificity(deg: int, emb: np.ndarray | None, centroid: np.ndarray | None, 
 # on its own. Moderate cosine merges via the BM25 boost — but a near-identical surface (high BM25)
 # with low semantic agreement (cosine < tau_homonym_guard) is a homonym and is refused.
 def should_merge(*, cosine: float, bm25: float, spec: float, cfg: MergeConfig,
-                 num_conflict: bool = False) -> bool:
-    if num_conflict: return False   # differing numbers/figures ⇒ distinct facts, never merge
+                 conflict: bool = False) -> bool:
+    if conflict: return False   # external distinctness signal (figures/content-slot) ⇒ never merge
     tau = cfg.tau_lo + spec * (cfg.tau_hi - cfg.tau_lo)
     if cosine >= tau: return True
     if cosine >= cfg.tau_bm25_boost and bm25 >= cfg.bm25_threshold:
@@ -169,19 +196,25 @@ def should_merge(*, cosine: float, bm25: float, spec: float, cfg: MergeConfig,
     return False
 
 # ── candidate generation ───────────────────────────────────────────────────────
-# top-k nearest n_ neighbours via nodes_vec ANN when present, brute-force otherwise.
-def _knn(con: sqlite3.Connection, va: np.ndarray, pool: dict[str, np.ndarray], k: int) -> list[str]:
-    try:
-        rows = con.execute("SELECT id, distance FROM nodes_vec WHERE info_vector MATCH ? "
-                           "AND k=? ORDER BY distance", (va.tobytes(), k + 1)).fetchall()
-        ids = [r[0] for r in rows if r[0] in pool]
-        if ids: return ids[:k]
-    except sqlite3.OperationalError:
-        pass
-    if not pool: return []
-    ids_list = list(pool)
-    sims = np.array([float(np.dot(va, pool[b])) for b in ids_list])
-    return [ids_list[i] for i in np.argsort(-sims)[:k]]
+# Batched exact KNN over unit vectors (cosine = dot): for every query id, its top-k pool neighbours.
+# A single BLAS matmul per query-chunk replaces the per-node Python loop — independent of any sqlite
+# extension, so it works on Pythons built without loadable-extension support (this one).
+def _knn_batch(query_ids: list[str], pool: dict[str, np.ndarray], k: int,
+               chunk: int = 1024) -> dict[str, list[str]]:
+    qids = [q for q in query_ids if q in pool]
+    if not qids or not pool: return {}
+    pool_ids = list(pool)
+    M = np.stack([pool[i] for i in pool_ids])                        # [Np, d]
+    out: dict[str, list[str]] = {}
+    kk = min(k + 1, len(pool_ids))                                   # +1 to absorb the self-match
+    for i in range(0, len(qids), chunk):
+        ch = qids[i:i + chunk]
+        S = np.stack([pool[q] for q in ch]) @ M.T                    # [b, Np] cosine
+        part = np.argpartition(-S, kk - 1, axis=1)[:, :kk]
+        for r, q in enumerate(ch):
+            cols = part[r][np.argsort(-S[r, part[r]])]
+            out[q] = [pool_ids[c] for c in cols if pool_ids[c] != q][:k]
+    return out
 
 def _accept_pairs_nodes(con, n_ids: list[str], all_vecs: dict,
                         idf: dict, avgdl: float, centroid, cfg: MergeConfig):
@@ -199,14 +232,15 @@ def _accept_pairs_nodes(con, n_ids: list[str], all_vecs: dict,
         ta, tb = _node_text(con, pair[0]), _node_text(con, pair[1])
         bm = bm25_sim(ta, tb, idf, avgdl)
         na, nb = _numeric_tokens(ta), _numeric_tokens(tb)
-        nc = bool(na) and bool(nb) and na != nb                      # differing figures ⇒ distinct
+        conflict = (bool(na) and bool(nb) and na != nb) or _discriminative_conflict(ta, tb)
         deg = max(_degree(con, pair[0]), _degree(con, pair[1]))
         spec = _specificity(deg, vb, centroid, cfg)
-        if should_merge(cosine=cos, bm25=bm, spec=spec, cfg=cfg, num_conflict=nc):
+        if should_merge(cosine=cos, bm25=bm, spec=spec, cfg=cfg, conflict=conflict):
             accepted.append(pair); scores[pair] = (cos, bm, 0.0, deg)
 
-    for a in [k for k in n_ids if k in n_vecs]:
-        for b in _knn(con, n_vecs[a], n_vecs, cfg.candidates):
+    nbrs = _knn_batch([k for k in n_ids if k in n_vecs], n_vecs, cfg.candidates)
+    for a, cands in nbrs.items():
+        for b in cands:
             if b != a: _score(a, b)
     return accepted, scores
 

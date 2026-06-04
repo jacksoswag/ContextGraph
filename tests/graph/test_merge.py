@@ -66,16 +66,30 @@ def test_norm_text_strips_commas_and_scales():
     assert _norm_text("4.2e9") == "4200000000"
 
 
-def test_numeric_conflict_blocks_different_figures():
+def test_conflict_blocks_merge_at_any_cosine():
     cfg = MergeConfig()
-    # different dates embed near-identically but disagree on a figure → block even at high cosine
-    assert not should_merge(cosine=0.98, bm25=0.9, spec=0.0, cfg=cfg, num_conflict=True)
-    # same-value figures (commas vs scale word) normalise equal → no conflict → merge
+    # an external distinctness signal blocks even at high cosine + high bm25
+    assert not should_merge(cosine=0.98, bm25=0.9, spec=0.0, cfg=cfg, conflict=True)
+
+def test_numeric_tokens_normalise_same_value():
     from graph.merge import _numeric_tokens
+    # same-value figures (commas vs scale word) normalise equal → no conflict
     assert _numeric_tokens("42,300,000") == _numeric_tokens("42.3 million")
     assert _numeric_tokens("23 may 1945") != _numeric_tokens("8 may 1945")
-    # number-free synonyms are never touched by the guard
+    # number-free synonyms carry no numeric tokens → guard inert
     assert _numeric_tokens("usa") == frozenset() and _numeric_tokens("united states") == frozenset()
+
+def test_discriminative_conflict_distinguishes_template_slots():
+    from graph.merge import _discriminative_conflict as dc
+    # share a template, differ in one content-word slot → distinct entities
+    assert dc("north korea", "south korea")
+    assert dc("united states", "united kingdom")
+    assert dc("22 june 1941", "22 july 1941")     # month-name slot the numeric guard can't see
+    # function-word / morphological / no-overlap differences are NOT conflicts
+    assert not dc("diary of anne frank", "anne frank's diary")  # of/s slot, both function words
+    assert not dc("normandy landing", "normandy landings")     # morphological variant
+    assert not dc("usa", "united states")                      # no shared template
+    assert not dc("black hole", "neutron star")                # differ in both slots
 
 def test_bm25_identical_texts_score_one():
     idf = {"marie": 2.0, "curie": 2.0}
