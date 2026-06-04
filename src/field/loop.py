@@ -10,7 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import torch
 from .config import FieldConfig, DEFAULT_CFG
-from .gather import materialize, gather, build_mesh, Mesh
+from .gather import materialize, gather, build_mesh, edge_weights, Mesh
+from .harness import safe_build
+from .baseline import personalized_pagerank
 from .seams import interpret
 from embed import embed, unpack
 from llm import call_json, call_llm
@@ -47,6 +49,53 @@ def gather_context(store, query: str, seeds: list[str], cfg: FieldConfig = GATHE
     qb = embed(query); qv = unpack(qb) if qb is not None else None
     qvt = torch.tensor(qv) if qv is not None else None
     return build_mesh(res, top_k=cfg.target_size, query_vec=qvt, query_w=QUERY_W)
+
+# structural coupling for the recursive path: pure adjacency × struct_edge_w (count·confidence) with the
+# genericity leak on; semantic cosine OFF (Gate 2 — structural ≥ semantic). N_max per round stays the
+# single-settle reach; the recursion supplies multi-hop, not a bigger episode.
+MESH_CFG = replace(GATHER_CFG, couple_mode="structural")
+
+# mesh_gather: the recursive collapse-to-mesh spine. Each round runs a structural personalized PageRank
+# (Gate 3 — the linear solve, not the integrator) teleported by the ANCESTRY vector, collapses the top
+# reified (e_) facts into the mesh, then re-personalizes on the freshly collapsed frontier (relevance-
+# weighted, depth-decayed) and expands. Two stops, whichever fires first: a round adds little new
+# (novelty < novelty_eps ⇒ region covered) or its relevance converges to the background PageRank
+# (TV < bg_tau ⇒ ancestry collapsed to noise). seeds given directly ⇒ testable without grounding.
+def mesh_gather(store, seeds, cfg: FieldConfig = MESH_CFG, *, max_rounds: int = 6, collapse_k: int = 12,
+                novelty_eps: float = 0.10, bg_tau: float = 0.05, depth_decay: float = 0.6) -> Mesh:
+    seeds = [s for s in dict.fromkeys(seeds)]
+    if not seeds: return Mesh([], [], {}, [])
+    ew = getattr(store, "struct_edge_weights", lambda: None)()
+    ancestry = {s: 1.0 for s in seeds}; frontier = list(seeds)
+    scored: dict[str, float] = {}                            # e_id → relevance at collapse
+    seen = set(seeds)
+    for depth in range(max_rounds):
+        ep, si = materialize(store, frontier, cfg)
+        if not ep.node_ids: break
+        C, _ = safe_build(ep, cfg, edge_weights(ep, ew)); W = C.sym; N = len(ep.node_ids)
+        t = torch.zeros(N)
+        for nid, w in ancestry.items():
+            j = ep.id_to_idx.get(nid)
+            if j is not None: t[j] = w
+        if float(t.sum()) <= 0: t[si] = 1.0
+        r = personalized_pagerank(W, teleport=t)
+        pi = personalized_pagerank(W, teleport=torch.ones(N))    # background null (uniform teleport = global PR)
+        if depth > 0 and 0.5 * float((r - pi).abs().sum()) < bg_tau: break   # ancestry → background = noise
+        order = sorted((i for i in range(N) if ep.node_ids[i].startswith("e_") and ep.node_ids[i] not in scored),
+                       key=lambda i: -float(r[i]))
+        new = order[:collapse_k]
+        if not new: break
+        kids, nxt = set(), {}
+        decay = depth_decay ** (depth + 1)
+        for i in new:
+            eid = ep.node_ids[i]; scored[eid] = float(r[i])
+            for kid in (store.children(eid) or ()):
+                kids.add(kid); nxt[kid] = nxt.get(kid, 0.0) + float(r[i]) * decay
+        novelty = len(kids - seen) / max(len(kids), 1)
+        seen |= kids; ancestry = nxt or ancestry; frontier = list(nxt) or frontier
+        if novelty < novelty_eps: break                          # region covered
+    ranked = sorted(scored, key=lambda e: -scored[e])
+    return Mesh(list(range(len(ranked))), ranked, {i: scored[e] for i, e in enumerate(ranked)}, [])
 
 # respond: the main path — interpret grounds the SUBJECT entities (3B refine + spaCy seed extraction,
 # multifaceted), then ONE grow+q gather, then ONE permissive 3B answer over the rendered facts.
