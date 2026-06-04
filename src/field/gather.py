@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from .config import FieldConfig
 from .episode import Episode
-from .coupling import Coupling, build as build_coupling
+from .coupling import build as build_coupling
 from .baseline import personalized_pagerank
 
 EMBED_DIM = 384
@@ -106,16 +106,6 @@ def materialize(store: _StoreProto, seed_ids: list[str], cfg: FieldConfig) -> tu
     ep = Episode(node_ids=keep, A=torch.from_numpy(A), edge_index=edge_index, id_to_idx=idx,
                  hyperedges=hyperedges, degree=deg)
     return ep, list(range(len(seeds)))
-
-# seed_init: X_0 directions = rownorm(P·A); seeds hot (R_max·c_seed), non-seeds cool ~0 (§3.2).
-# P is a fixed random projection seeded by rng_seed (determinism). Returns (X0, P).
-def seed_init(ep: Episode, seed_idx: list[int], C: Coupling, cfg: FieldConfig, rng_seed: int = 0) -> tuple[Tensor, Tensor]:
-    g = torch.Generator().manual_seed(rng_seed)
-    P = F.normalize(torch.randn(cfg.d, EMBED_DIM, generator=g), dim=-1)   # [d,384] fixed
-    dirs = F.normalize(ep.A.float() @ P.T, dim=-1)                        # [N,d] = rownorm(P·A)
-    X0 = torch.zeros(len(ep.node_ids), cfg.d)
-    X0[seed_idx] = (C.R_max * cfg.c_seed) * dirs[seed_idx]
-    return X0, P
 
 # edge_weights: resolve a Sleep-learned per-edge multiplier tensor [E] for this episode (default 1).
 # `weights` exposes .get(u_id, v_id) → multiplier; None ⇒ bootstrap coupling.
