@@ -10,10 +10,11 @@ class FieldConfig:
     d: int = 64                    # node state dim
     mu: float = 0.1                # barrier coefficient (‖x‖⁴ term, §3.3)
     beta: float = 2.0              # inhibition sharpness β = gather breadth (§3.3, §3.6)
-    # coupling strength source: "semantic" weights each edge by its endpoints' info_vector cosine
-    # (the default attraction force); "structural" ignores embeddings and weights every edge equally
-    # (degree-normalized adjacency ⇒ a nonlinear PPR). Structure always gates the SUPPORT either way.
-    couple_mode: str = "semantic"
+    # coupling strength source: "structural" (default) ignores embeddings and weights every edge by
+    # struct_edge_w (count·confidence), degree-normalized ⇒ a nonlinear PPR; "semantic" weights each
+    # edge by its endpoints' info_vector cosine. Gate 2: structural ≥ semantic on coverage+bridge, so
+    # semantics no longer earn a place in the dynamics — they stay only at the find_vec grounding seam.
+    couple_mode: str = "structural"
     # gather: seed anchoring + active-set reachability (§3.1–3.3, §10)
     sigma_anchor: float = 1.0      # anchor potential strength σ (tie-to-seed/parent)
     c_seed: float = 0.7            # seed hot-init fraction of R_max (§3.2)

@@ -1,12 +1,12 @@
 from __future__ import annotations
-# The single retrieval pipeline (respond): interpret → grow+q gather → one permissive answer. No
-# recursion. Control flow is tested with interpret / gather_context / call_llm stubbed (the gather
-# physics is covered by test_gather); these assert the wiring: seeds → context → answer + provenance.
+# The retrieval pipeline (respond): interpret → recursive collapse-to-mesh gather → one permissive
+# answer. Control flow is tested with interpret / mesh_gather / call_llm stubbed (the mesh physics is
+# covered by test_mesh); these assert the wiring: seeds → context → answer + provenance.
 import field.loop as loop_mod
 from field.loop import respond, Response
 from field.gather import Mesh
 
-# fake store: text(e_) → fact surface. interpret + gather_context are stubbed per-test, so the store
+# fake store: text(e_) → fact surface. interpret + mesh_gather are stubbed per-test, so the store
 # only needs to render the e_ facts respond pulls into context.
 class _Store:
     def __init__(self, facts): self._facts = facts
@@ -20,7 +20,7 @@ def _mesh(ids):
 
 def _stub(monkeypatch, *, seeds, mesh, prose="ANSWER"):
     monkeypatch.setattr(loop_mod, "interpret", lambda q, s, **k: {"seeds": seeds, "intent": "the intent"})
-    monkeypatch.setattr(loop_mod, "gather_context", lambda *a, **k: mesh)
+    monkeypatch.setattr(loop_mod, "mesh_gather", lambda *a, **k: mesh)
     monkeypatch.setattr(loop_mod, "call_llm", lambda prompt, model, options=None: prose)
 
 # ── happy path: seeds → gathered facts → answer + e_-only citations ───────────────────
@@ -39,7 +39,7 @@ def test_respond_context_passed_to_llm(monkeypatch):
     store = _Store({"e_1": "curie discover radium"})
     seen = {}
     monkeypatch.setattr(loop_mod, "interpret", lambda q, s, **k: {"seeds": ["n_c"], "intent": "i"})
-    monkeypatch.setattr(loop_mod, "gather_context", lambda *a, **k: _mesh(["e_1"]))
+    monkeypatch.setattr(loop_mod, "mesh_gather", lambda *a, **k: _mesh(["e_1"]))
     def cap(prompt, model, options=None): seen["p"] = prompt; seen["m"] = model; return "ok"
     monkeypatch.setattr(loop_mod, "call_llm", cap)
     respond("q", store)
@@ -65,6 +65,6 @@ def test_respond_no_seeds_graceful(monkeypatch):
 def test_respond_empty_mesh_graceful(monkeypatch):
     store = _Store({})
     monkeypatch.setattr(loop_mod, "interpret", lambda q, s, **k: {"seeds": ["n_x"], "intent": "i"})
-    monkeypatch.setattr(loop_mod, "gather_context", lambda *a, **k: None)
+    monkeypatch.setattr(loop_mod, "mesh_gather", lambda *a, **k: _mesh([]))   # mesh_gather returns empty Mesh
     r = respond("q", store)
     assert r.seeds == ["n_x"] and "No matching concepts" in r.answer["prose"]

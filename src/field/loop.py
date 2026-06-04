@@ -98,14 +98,16 @@ def mesh_gather(store, seeds, cfg: FieldConfig = MESH_CFG, *, max_rounds: int = 
     return Mesh(list(range(len(ranked))), ranked, {i: scored[e] for i, e in enumerate(ranked)}, [])
 
 # respond: the main path — interpret grounds the SUBJECT entities (3B refine + spaCy seed extraction,
-# multifaceted), then ONE grow+q gather, then ONE permissive 3B answer over the rendered facts.
-def respond(query, store, cfg: FieldConfig = GATHER_CFG, *, llm=call_json, model: str = "3B") -> Response:
+# multifaceted), then the recursive collapse-to-mesh gather builds the connected multi-hop region, then
+# ONE permissive 3B answer over the rendered facts. The query enters at grounding + the answer prompt;
+# the mesh expansion stays query-blind (structure). gather_context (single settle) is kept for the benches.
+def respond(query, store, cfg: FieldConfig = MESH_CFG, *, llm=call_json, model: str = "3B") -> Response:
     interp = interpret(query, store, llm=llm)
     seeds = interp["seeds"]
     no_match = {"prose": "No matching concepts found in the graph.", "citations": []}
     if not seeds: return Response(interp["intent"], [], no_match, [])
-    mesh = gather_context(store, query, seeds, cfg)
-    if mesh is None or not mesh.node_ids: return Response(interp["intent"], seeds, no_match, [])
+    mesh = mesh_gather(store, seeds, cfg)
+    if not mesh.node_ids: return Response(interp["intent"], seeds, no_match, [])
     facts = [t for n in mesh.node_ids if n.startswith("e_") and (t := store.text(n))]
     ctx = "\n".join(f"- {f}" for f in facts)
     prose = call_llm(ANSWER_PROMPT.format(ctx=ctx, q=query), model,
