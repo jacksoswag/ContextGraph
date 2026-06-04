@@ -1,7 +1,6 @@
 from __future__ import annotations
 # harness.py — toy-graph builders + episode setup, reused by gather tests/experiments.
 # (The retired rotation-sweep experiment driver was removed at G3.)
-import dataclasses
 import torch, torch.nn.functional as F
 from torch import Tensor
 from .config import FieldConfig
@@ -58,14 +57,8 @@ def make_two_incomm_rings(r1: int = 5, r2: int = 7, seed: int = 42) -> Episode:
     edges = _ring_edges(list(range(r1))) + _ring_edges(list(range(r1, N))) + [(0, r1), (r1, 0)]
     return Episode(ids, _anchors([r1, r2], seed=seed), _ei(edges), {v: i for i, v in enumerate(ids)})
 
-# ── safe coupling build: adjusts η if above L-derived bound (§3.4) ────────────────
+# ── coupling build: thin wrapper kept for mesh_gather's call site ────────────────
+# Post-PPR-gate there is no step size to clamp, so this just builds C; the cfg is returned unchanged
+# to preserve the (Coupling, cfg) tuple shape mesh_gather destructures.
 def safe_build(ep: Episode, cfg: FieldConfig, edge_w=None) -> tuple[Coupling, FieldConfig]:
-    C = build_coupling(ep, cfg, edge_w)                  # build() ignores cfg.eta; eta_bound is advisory
-    safe_eta = min(cfg.eta, C.eta_bound * 0.9)
-    return C, (cfg if safe_eta >= cfg.eta else dataclasses.replace(cfg, eta=safe_eta))
-
-# X_0 = rownorm(P @ A), P fixed random projection (spec §3.2)
-def init_X(ep: Episode, cfg: FieldConfig, seed: int = 0) -> Tensor:
-    g = torch.Generator().manual_seed(seed)
-    P = F.normalize(torch.randn(cfg.d, 384, generator=g), dim=-1)  # [d, 384]
-    return F.normalize(ep.A.float() @ P.T, dim=-1)
+    return build_coupling(ep, cfg, edge_w), cfg

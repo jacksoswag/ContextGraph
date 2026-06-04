@@ -37,7 +37,7 @@ def descriptors(r):
                 m10=float(csum[min(9, len(csum)-1)]), m34=float(csum[min(33, len(csum)-1)]))
 
 def cfg(**kw):
-    return dataclasses.replace(DEFAULT_CFG, N_max=200, H_max=3000, eps_x=1e-3, decay=1.5, **kw)
+    return dataclasses.replace(DEFAULT_CFG, N_max=200, decay=1.5, **kw)
 
 def run(store_path):
     store = GraphStore(store_path)

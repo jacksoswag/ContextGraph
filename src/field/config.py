@@ -1,36 +1,31 @@
 from __future__ import annotations
 from dataclasses import dataclass
 
-# FieldConfig: knobs for the convergent-gather field (spec §3, §10). Pure gradient settle —
-# rotation + trajectory-classification knobs retired at G3; config B/C coherence leak + active-set
-# builders (_khop/_climb) cut at finetune pass (spec §2 CUT NOW).
+# FieldConfig: knobs for the convergent-gather field (spec §3, §10). Post-PPR-gate the per-settle
+# engine is a personalized-PageRank solve, so the gradient-integrator knobs (η/H_max/H_hold/ε_x/μ/β/
+# σ_anchor/c_seed/d) are gone with the integrator; the surviving knobs shape the active set, the
+# coupling W, the genericity leak, and the readout.
 @dataclass
 class FieldConfig:
-    # state / coupling (§3.2–3.3)
-    d: int = 64                    # node state dim
-    mu: float = 0.1                # barrier coefficient (‖x‖⁴ term, §3.3)
-    beta: float = 2.0              # inhibition sharpness β = gather breadth (§3.3, §3.6)
     # coupling strength source: "structural" (default) ignores embeddings and weights every edge by
-    # struct_edge_w (count·confidence), degree-normalized ⇒ a nonlinear PPR; "semantic" weights each
+    # struct_edge_w (count·confidence), degree-normalized ⇒ PPR over structure; "semantic" weights each
     # edge by its endpoints' info_vector cosine. Gate 2: structural ≥ semantic on coverage+bridge, so
-    # semantics no longer earn a place in the dynamics — they stay only at the find_vec grounding seam.
+    # semantics no longer earn a place in the coupling — they stay only at the find_vec grounding seam.
     couple_mode: str = "structural"
-    # gather: seed anchoring + active-set reachability (§3.1–3.3, §10)
-    sigma_anchor: float = 1.0      # anchor potential strength σ (tie-to-seed/parent)
-    c_seed: float = 0.7            # seed hot-init fraction of R_max (§3.2)
+    # active-set reachability (§3.1) — _grow_set materialization from the seeds
     k_hop: int = 2                 # active-set depth from seeds in _grow_set (§3.1)
     N_max: int = 512               # active-set node cap, by descending edge weight (§3.1)
     up_max: int = 8                # max containing edges pulled per node when climbing up
     down_decay: float = 0.5        # weight decay per containment level in _grow_set
-    # hyperedge containment: extra coupling binding a reified edge (e_ id) to its child
-    # endpoints, so energy stays within a hyperedge when it has children. 0 ⇒ flat dyadic.
+    # hyperedge containment: extra coupling binding a reified edge (e_ id) to its child endpoints, so
+    # PPR mass stays within a hyperedge when it has children. 0 ⇒ flat dyadic.
     w_hyper: float = 0.5
-    # decay: per-node leak λ‖x‖² on non-anchored rows (PPR-teleport analogue, 📍1 decision) —
-    # makes the settled fixed point localize instead of over-spreading to global co-activation.
-    decay: float = 1.5             # leak strength λ (locality knob; 📍3-fixed default)
+    # decay: per-node genericity leak λ_i (📍1 LOCALIZE decision) — in the PPR family it becomes the
+    # per-destination absorption sink in gather (generic hubs absorb faster ⇒ the settle localizes
+    # instead of over-spreading to global co-activation).
+    decay: float = 1.5             # leak floor λ (locality knob; 📍3-fixed default)
     # genericity slope on the leak: λ_i = decay·(1 + decay_gamma·ln(1+deg_i)) per node, so generic
-    # hubs leak faster ⇒ the low→high climb costs more through ambiguous hubs (the hill's steepness).
-    # 0 ⇒ uniform decay (scalar). Stays a PSD diagonal potential ⇒ E remains Lyapunov.
+    # hubs leak faster ⇒ the low→high climb costs more through ambiguous hubs. 0 ⇒ uniform decay.
     decay_gamma: float = 0.0
     # readout breadth S*: build_mesh keeps the top `target_size` relevance-ranked nodes — the single
     # "how much context" knob. CONSTANT by decision: the S* sweep showed answer coverage is
@@ -41,11 +36,6 @@ class FieldConfig:
     query_w: float = 0.0
     # support / mesh (§3.5)
     tau_support: float = 0.5       # mesh threshold τ (support_τ)
-    eps_x: float = 1e-4            # settle ΔX convergence threshold
-    # integration (§3.4)
-    eta: float = 0.01              # step size η (bounded by c/L)
-    H_max: int = 4000              # max rollout horizon (§10)
-    H_hold: int = 50               # consecutive sub-ε_x steps required to declare settled (§10)
     # child-mesh inheritance (§5)
     k_inherit: int = 4             # parent-mesh nodes inherited as child anchors
     # Sleep / offline learning (§6)

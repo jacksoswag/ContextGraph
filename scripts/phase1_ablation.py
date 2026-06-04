@@ -24,8 +24,7 @@ QUERIES = [
 ]
 
 def cfg(**kw):
-    return dataclasses.replace(DEFAULT_CFG, N_max=200, H_max=3000, eps_x=1e-3,
-                                decay=1.5, decay_gamma=1.0, **kw)
+    return dataclasses.replace(DEFAULT_CFG, N_max=200, decay=1.5, decay_gamma=1.0, **kw)
 
 CONDITIONS = [
     ("structural      ", cfg(couple_mode="structural"), False),

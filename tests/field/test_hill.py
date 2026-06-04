@@ -14,7 +14,7 @@ from field.harness import make_single_clique
 def _node(t): return {"type": "node", "text": t, "pos": "NOUN"}
 def _edge(s, r, t): return {"type": "edge", "rel": r, "source": s, "target": t,
                             "_source_text": "x", "_clause_text": "x"}
-def _cfg(**kw): return dataclasses.replace(DEFAULT_CFG, **{"N_max": 200, "H_max": 2000, **kw})
+def _cfg(**kw): return dataclasses.replace(DEFAULT_CFG, **{"N_max": 200, **kw})
 
 # depth-4 nested spine: public trust [ journal publish [ scientist believe [ smoking cause cancer ] ] ]
 _CHAIN = _edge(_node("public"), "trust", _edge(_node("journal"), "publish",

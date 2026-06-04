@@ -24,10 +24,8 @@ ANSWER_PROMPT = ("Reference facts (may be partial):\n{ctx}\n\nAnswer with specif
                  "these facts AND your own knowledge.\nQuestion: {q}")
 
 # grow+q gather config: genericity-localized uniform growth; k_hop 3 / up_max 60 cover a 2-hop
-# lateral reach. eps_x 1e-3: top-34 set stabilizes long before ‖ΔX‖ hits 1e-4 — measured top-34
-# overlap 1.0000 vs tight settle, cutting steps 1.5–4×. Pairs with gather(lean=True).
-GATHER_CFG = replace(DEFAULT_CFG, decay_gamma=1.0, k_hop=3, up_max=60, N_max=400,
-                     target_size=34, eps_x=1e-3)
+# lateral reach. The PPR settle is a direct linear solve (no step horizon to tune).
+GATHER_CFG = replace(DEFAULT_CFG, decay_gamma=1.0, k_hop=3, up_max=60, N_max=400, target_size=34)
 QUERY_W = 4.0                                            # readout selection weight (query meets structure)
 
 # Response: the result of one pipeline run. Flat — there is no tree. mesh_ids is the gathered region
