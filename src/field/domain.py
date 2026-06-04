@@ -135,7 +135,7 @@ def adaptive_gather(ctx: TreeContext, seed_ids: list[str], cfg: FieldConfig = DE
             for nid in live_anchor:
                 if nid in ep.id_to_idx and nid not in seed_set and nid in state:
                     j = ep.id_to_idx[nid]; mask[j] = 1.0; target[j] = state[nid]
-        Xh, _ = rollout(X0, C, cfg2, Anchor(mask=mask, target=target))
+        Xh, _, _ = rollout(X0, C, cfg2, Anchor(mask=mask, target=target))
         Xs = Xh[-1]; r = (Xs * Xs).sum(-1)              # relevance per live node
 
         # hybrid commit threshold: min(absolute, relative-quantile), floored — fires on genuine

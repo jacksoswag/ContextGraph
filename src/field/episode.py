@@ -11,3 +11,5 @@ class Episode:
     # beyond-pairwise groups: each (member_indices, weight) is a reified edge bound to
     # its child endpoints — energy stays within it (containment). Empty ⇒ flat dyadic.
     hyperedges: list[tuple[list[int], float]] = field(default_factory=list)
+    # global store degree per node (genericity) — drives node-wise decay. None ⇒ uniform leak.
+    degree: Tensor | None = None

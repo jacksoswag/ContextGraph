@@ -6,9 +6,8 @@ from .coupling import Coupling
 from .energy import grad_E, compute_E, Anchor
 
 # step: one explicit-Euler gradient-descent step of Ẋ=−∇E with trapping guard (spec §3.4)
-def step(X: Tensor, C: Coupling, cfg: FieldConfig, anchor: Anchor | None = None,
-         lam_override: Tensor | None = None) -> Tensor:
-    G = -grad_E(X, C, cfg, anchor, lam_override)
+def step(X: Tensor, C: Coupling, cfg: FieldConfig, anchor: Anchor | None = None) -> Tensor:
+    G = -grad_E(X, C, cfg, anchor)
     X_next = X + cfg.eta * G
     # barrier enforced by clamp to the absorbing ball (R_max)
     norms = X_next.norm(dim=-1, keepdim=True)
@@ -38,6 +37,6 @@ def rollout(X0: Tensor, C: Coupling, cfg: FieldConfig, anchor: Anchor | None = N
         settled = settled + 1 if (X - X_prev).norm().item() < cfg.eps_x else 0
         if settled >= cfg.H_hold: break
     if lean:
-        E = torch.tensor([compute_E(X0, C, cfg, anchor, None).item(), compute_E(X, C, cfg, anchor, None).item()])
+        E = torch.tensor([compute_E(X0, C, cfg, anchor).item(), compute_E(X, C, cfg, anchor).item()])
         return torch.stack([X0, X]), E, steps
     return torch.stack(X_hist), torch.tensor(E_hist), steps
