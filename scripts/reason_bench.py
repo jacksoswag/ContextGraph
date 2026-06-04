@@ -18,7 +18,7 @@ from graph import GraphStore
 from llm import call_llm, warm_models
 from wd_qa import build_qa, build_multihop, coverage
 
-CFG = dataclasses.replace(DEFAULT_CFG, up_reach=True, decay_gamma=1.0, N_max=400, k_hop=4, up_max=30,
+CFG = dataclasses.replace(DEFAULT_CFG, decay_gamma=1.0, N_max=400, k_hop=4, up_max=30,
                           target_size=34)                 # plateau knee from the S* sweep
 TOPK = 34                                                 # equal context budget for rag + field
 QUERY_W = 4.0                                             # field readout: tilt toward query relevance
@@ -52,7 +52,7 @@ def ctx_field(store, query, k=TOPK, query_w=QUERY_W):
     res = gather(ep, si, CFG)
     from embed import embed, unpack
     qb = embed(query); qv = torch.tensor(unpack(qb)) if qb is not None else None
-    mesh = build_mesh(res, top_k=k, provenance="flow", query_vec=qv, query_w=query_w)
+    mesh = build_mesh(res, top_k=k, query_vec=qv, query_w=query_w)
     return e_facts(store, mesh.node_ids)
 
 # flat system (the "optimal combo"): wide query-conditioned gather + ONE bounded expansion, no
@@ -79,44 +79,27 @@ def ctx_flat(store, query, k=TOPK, expand=True, query_w=QUERY_W):
             ep, si = materialize(store, seeds2, CFG); res = gather(ep, si, CFG)
     from embed import embed, unpack
     qb = embed(query); qv = torch.tensor(unpack(qb)) if qb is not None else None
-    mesh = build_mesh(res, top_k=k, provenance="flow", query_vec=qv, query_w=query_w)
+    mesh = build_mesh(res, top_k=k, query_vec=qv, query_w=query_w)
     return e_facts(store, mesh.node_ids)
 
-# grow+q context: the "no special case" path — uniform best-first growth (climb_all) guided by
-# query-coherence, query-conditioned readout. The candidate main path, here as a benchmarkable context.
-GROW_CFG = dataclasses.replace(CFG, climb_all=True, k_hop=3, up_max=60, grow_cohere=3.0)
+# grow+q context: uniform best-first growth, query-conditioned readout.
+GROW_CFG = dataclasses.replace(CFG, k_hop=3, up_max=60)
 def ctx_grow(store, query, k=TOPK, query_w=QUERY_W, grow_cohere=3.0):
-    cfg = dataclasses.replace(GROW_CFG, grow_cohere=grow_cohere)
+    cfg = GROW_CFG
     cands = [c for c in store.find_vec(query, 6) if not c.startswith("e_")]
     seeds = cands[:1] or store.find_vec(query, 1)
     from embed import embed, unpack
     qb = embed(query); qv = torch.tensor(unpack(qb)) if qb is not None else None
-    ep, si = materialize(store, seeds, cfg, query_vec=(qv.numpy() if qv is not None else None))
+    ep, si = materialize(store, seeds, cfg)
     if not ep.node_ids: return []
     res = gather(ep, si, cfg)
-    mesh = build_mesh(res, top_k=k, provenance="flow", query_vec=qv, query_w=query_w)
+    mesh = build_mesh(res, top_k=k, query_vec=qv, query_w=query_w)
     return e_facts(store, mesh.node_ids)
 
-# qseed: the natural mechanic — the SEED is the query hyperedge itself (possibly targetless / a
-# question). The query embedding is attached as a hot virtual node coupled to the query-relevant active
-# facts, so the query enters the DYNAMICS (the settle completes the targetless hyperedge) and relevance
-# ‖x*‖² carries it natively. Readout uses NO query_w — if this matches grow+q, the readout knob is
-# redundant and can be deleted. grow_cohere still guides growth (query as the lineage root throughout).
-QSEED_CFG = dataclasses.replace(GROW_CFG, grow_cohere=3.0)
+# qseed: legacy condition — deleted (attach_query_node removed in Phase 0). Stub so imports don't break.
+QSEED_CFG = GROW_CFG
 def ctx_qseed(store, query, k=TOPK, link_top=50, coseed=True):
-    from embed import embed, unpack
-    from field.gather import attach_query_node
-    cands = [c for c in store.find_vec(query, 6) if not c.startswith("e_")]
-    seeds = cands[:1] or store.find_vec(query, 1)
-    qb = embed(query); qv = unpack(qb) if qb is not None else None
-    ep, si = materialize(store, seeds, QSEED_CFG, query_vec=qv)
-    if not ep.node_ids: return []
-    if qv is None:
-        res = gather(ep, si, QSEED_CFG)
-    else:
-        ep2, qidx = attach_query_node(ep, qv, link_top)
-        res = gather(ep2, ([qidx] + si) if coseed else [qidx], QSEED_CFG)
-    return e_facts(store, build_mesh(res, top_k=k, provenance="flow").node_ids)   # no query_w
+    return ctx_grow(store, query, k=k)
 
 def ask(model, q, facts):
     if facts:
