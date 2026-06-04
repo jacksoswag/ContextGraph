@@ -6,10 +6,8 @@ import torch.nn.functional as F
 from torch import Tensor
 from .config import FieldConfig
 from .episode import Episode
-from .coupling import Coupling
-from .energy import Anchor
-from .dynamics import rollout
-from .harness import safe_build
+from .coupling import Coupling, build as build_coupling
+from .baseline import personalized_pagerank
 
 EMBED_DIM = 384
 _FALLBACK_ANCHOR = (np.ones(EMBED_DIM, dtype=np.float32) / math.sqrt(EMBED_DIM))
@@ -21,16 +19,12 @@ class _StoreProto:
 
 @dataclass
 class GatherResult:
-    X_star: Tensor       # [N,d] settled state X*
-    X_hist: Tensor       # [T,N,d] trajectory
-    E_hist: Tensor       # [T] energy trace
+    r: Tensor            # [N] personalized-PageRank relevance r_i (∑r≈1) — replaces ‖x*_i‖²
     ep: Episode
-    C: Coupling
     cfg: FieldConfig
     seed_idx: list[int]
-    steps: int           # settle step count (T-1); < H_max ⇒ converged early
-    def relevance(self) -> Tensor:           # r_i = ‖x*_i‖²  (spec §3.5)
-        return (self.X_star * self.X_star).sum(-1)
+    def relevance(self) -> Tensor:           # r_i = stationary PPR mass (spec §3.5, post-PPR-gate)
+        return self.r
 
 # _grow_set: uniform best-first growth — every reached node expands UP (its containing edges;
 # works for nodes AND edges, so containment depth still accrues) and, if it is an edge, DOWN (its
@@ -123,18 +117,6 @@ def seed_init(ep: Episode, seed_idx: list[int], C: Coupling, cfg: FieldConfig, r
     X0[seed_idx] = (C.R_max * cfg.c_seed) * dirs[seed_idx]
     return X0, P
 
-# build_anchor: pin seeds to their hot init; optionally pin inherited (parent) rows to parent state
-# (§3.3, §5). `inherited_target` is a full [N,d] tensor (the masked rows are copied). The anchor
-# potential keeps E a Lyapunov function while tying the gather to its seeds (and to the parent).
-def build_anchor(ep: Episode, seed_idx: list[int], X0: Tensor, cfg: FieldConfig,
-                 inherited_idx: list[int] | None = None, inherited_target: Tensor | None = None) -> Anchor:
-    N, d = len(ep.node_ids), cfg.d
-    mask = torch.zeros(N); target = torch.zeros(N, d)
-    mask[seed_idx] = 1.0; target[seed_idx] = X0[seed_idx]
-    if inherited_idx:
-        mask[inherited_idx] = 1.0; target[inherited_idx] = inherited_target[inherited_idx]
-    return Anchor(mask=mask, target=target)
-
 # edge_weights: resolve a Sleep-learned per-edge multiplier tensor [E] for this episode (default 1).
 # `weights` exposes .get(u_id, v_id) → multiplier; None ⇒ bootstrap coupling.
 def edge_weights(ep: Episode, weights) -> Tensor | None:
@@ -144,22 +126,41 @@ def edge_weights(ep: Episode, weights) -> Tensor | None:
     return torch.tensor([weights.get(nid[a], nid[b]) for a, b in zip(s.tolist(), d.tolist())],
                         dtype=torch.float32)
 
-# gather: the one physics op — seed-anchored convergent settle over a materialized Episode (§3).
-# lean (live path) drops per-step trajectory/energy logging (X* identical; see dynamics.rollout).
-def gather(ep: Episode, seed_idx: list[int], cfg: FieldConfig, rng_seed: int = 0,
-           inherited_idx: list[int] | None = None, inherited_target: Tensor | None = None,
-           weights=None, *, lean: bool = False) -> GatherResult:
-    C, cfg = safe_build(ep, cfg, edge_weights(ep, weights))
-    X0, _ = seed_init(ep, seed_idx, C, cfg, rng_seed)
-    anc = build_anchor(ep, seed_idx, X0, cfg, inherited_idx, inherited_target)
-    Xh, Eh, steps = rollout(X0, C, cfg, anc, lean=lean)
-    return GatherResult(Xh[-1], Xh, Eh, ep, C, cfg, list(seed_idx), steps)
+# _genericity_ppr: per-node relevance by a personalized-PageRank solve on W=C.sym — the Gate-3 linear
+# solve the gradient integrator was scaffolding for (field2 0.79 < ppr2 0.90 on the multi-seed bridge).
+# The genericity leak λ_i=decay·(1+γ·ln deg) (the LOCALIZE spine that WON, 📍1) lived in the gradient,
+# NOT in C.sym; in the PPR family it re-expresses as a per-node ABSORPTION — a fraction (1−g_j) of the
+# mass arriving at node j is drained to a dangling sink, g_j = min(decay_vec)/decay_vec_j ∈ (0,1].
+# Generic hubs (large decay_vec) absorb more, so they AND everything reachable only through them are
+# demoted ⇒ the walk localizes to the seed. decay_vec=None (γ=0) adds no sink ⇒ this is EXACTLY
+# personalized_pagerank(W, seed_idx/teleport) — gather and the baseline coincide on the flat store.
+def _genericity_ppr(W: Tensor, seed_idx: list[int], teleport: Tensor | None, decay_vec: Tensor | None) -> Tensor:
+    if decay_vec is None:
+        return personalized_pagerank(W, seed_idx=seed_idx, teleport=teleport)
+    N = W.shape[0]
+    g = (float(decay_vec.min()) / decay_vec).clamp(max=1.0)   # per-destination genericity discount
+    Wc = W.clamp(min=0.0)
+    col = Wc * g.unsqueeze(0)                                 # inflow to generic destinations discounted
+    W_aug = torch.zeros(N + 1, N + 1)
+    W_aug[:N, :N] = col
+    W_aug[:N, N] = Wc.sum(1) - col.sum(1)                     # absorbed remainder → dangling sink row
+    t_aug = None if teleport is None else torch.cat([teleport, teleport.new_zeros(1)])
+    return personalized_pagerank(W_aug, seed_idx=seed_idx, teleport=t_aug)[:N]
 
-# gather_from_store: materialize the active set from S, then settle (§3.1 + §3).
-def gather_from_store(store: _StoreProto, seed_ids: list[str], cfg: FieldConfig, rng_seed: int = 0,
-                      weights=None, *, lean: bool = False) -> GatherResult:
+# gather: the one retrieval op — a personalized-PageRank settle over a materialized Episode (§3). seeds
+# (or an ancestry `teleport` vector — the inherited-anchor replacement) restart the walk; the genericity
+# leak localizes it. Replaces the gradient rollout: relevance is the stationary PPR mass, no d-dim state.
+# `lean` is accepted for call-site compatibility (PPR has no per-step trajectory to skip) and ignored.
+def gather(ep: Episode, seed_idx: list[int], cfg: FieldConfig, *, teleport: Tensor | None = None,
+           weights=None, lean: bool = False) -> GatherResult:
+    C = build_coupling(ep, cfg, edge_weights(ep, weights))
+    r = _genericity_ppr(C.sym, list(seed_idx), teleport, C.decay_vec)
+    return GatherResult(r, ep, cfg, list(seed_idx))
+
+# gather_from_store: materialize the active set from S, then PPR-settle (§3.1 + §3).
+def gather_from_store(store: _StoreProto, seed_ids: list[str], cfg: FieldConfig, *, weights=None) -> GatherResult:
     ep, seed_idx = materialize(store, seed_ids, cfg)
-    return gather(ep, seed_idx, cfg, rng_seed, weights=weights, lean=lean)
+    return gather(ep, seed_idx, cfg, weights=weights)
 
 # Mesh: the gather readout (spec §3.5) — relevance-ranked nodes, query-conditioned.
 @dataclass

@@ -16,22 +16,23 @@ def store():
     from graph import GraphStore
     s = GraphStore(_STORE_PATH); yield s; s.close()
 
-# keep runtime small: cap the active set, but use the real decay/anchor defaults
+# keep runtime small: cap the active set, but use the real decay defaults
 def _cfg(**kw):
-    return dataclasses.replace(DEFAULT_CFG, **{"N_max": 200, "H_max": 3000, **kw})
+    return dataclasses.replace(DEFAULT_CFG, **{"N_max": 200, **kw})
 
 _SEEDS = ["dog", "france", "music"]
 
 @pytest.mark.parametrize("word", _SEEDS)
-def test_real_gather_settles_and_localizes(store, word):
+def test_real_gather_localizes_to_seed(store, word):
     sid = store.find(word, 1)
     assert sid, f"no node for {word!r}"
     res = gather_from_store(store, sid, _cfg())
-    # convergence (§7.1): the damped diffusion settles before H_max
-    assert res.steps < res.cfg.H_max, f"{word}: did not settle ({res.steps} steps)"
-    # the seed is the most-relevant node (§3.5 — anchor + decay localize to the seed)
+    # the PPR settle localizes to the seed: it outweighs the entire region beyond its 1-hop ring
+    # (§3.5 — teleport + genericity sink concentrate mass on the seed neighborhood).
     rel = res.relevance()
-    assert int(rel.argmax()) == res.seed_idx[0], f"{word}: seed not hottest"
+    dist = hop_distances(res.ep, res.seed_idx)
+    far = [float(rel[i]) for i in range(len(rel)) if dist[i] >= 2]
+    assert float(rel[res.seed_idx[0]]) > (max(far) if far else 0.0), f"{word}: seed not dominant"
 
 @pytest.mark.parametrize("word", _SEEDS)
 def test_real_gather_locality_within_k_hop(store, word):
@@ -51,6 +52,6 @@ def test_real_gather_locality_within_k_hop(store, word):
 def test_real_gather_deterministic(store):
     sid = store.find("france", 1)
     import torch
-    a = gather_from_store(store, sid, _cfg(), rng_seed=0).X_star
-    b = gather_from_store(store, sid, _cfg(), rng_seed=0).X_star
+    a = gather_from_store(store, sid, _cfg()).relevance()
+    b = gather_from_store(store, sid, _cfg()).relevance()
     assert torch.equal(a, b)

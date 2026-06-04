@@ -6,12 +6,11 @@ from pathlib import Path
 import pytest, torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from nested_corpus import build_store
-from climb_eval import safety
 from field.config import DEFAULT_CFG
 from field.gather import materialize, gather
 from graph import GraphStore
 
-def _cfg(**kw): return dataclasses.replace(DEFAULT_CFG, **{"N_max": 150, "H_max": 4000, "k_hop": 4, **kw})
+def _cfg(**kw): return dataclasses.replace(DEFAULT_CFG, **{"N_max": 150, "k_hop": 4, **kw})
 
 @pytest.fixture(scope="module")
 def corpus(tmp_path_factory):
@@ -50,10 +49,19 @@ def test_hyperedge_children_unpack(corpus):
             return
     pytest.fail("no hyperedge clique materialized across seeds")
 
-# ── the field settles safely on nested data (Lyapunov + bounded) ──────────────────────────
-def test_field_settles_on_nested(corpus):
+# ── the PPR gather localizes on nested data: genericity demotes hubs ───────────────────────
+def test_genericity_localizes_on_nested(corpus):
     s, gold, _ = corpus
+    # with genericity ON the ranking differs from the uniform-α PPR, and the most-generic (highest
+    # global-degree) non-seed node loses relevance share — the leak's localization, now a PPR sink.
+    changed = demoted = 0
     for lab in list(gold)[:5]:
         ep, si = materialize(s, [gold[lab]["seed_node"]], _cfg(decay_gamma=1.0))
-        settled, bnd, _rise = safety(gather(ep, si, _cfg(decay_gamma=1.0)))
-        assert settled and bnd                             # converged, net-descending, ‖x‖≤R_max
+        if ep.degree is None: continue
+        r_on = gather(ep, si, _cfg(decay_gamma=1.0)).relevance()
+        r_off = gather(ep, si, _cfg(decay_gamma=0.0)).relevance()
+        if not torch.allclose(r_on, r_off): changed += 1
+        hub = max((i for i in range(len(ep.node_ids)) if i not in set(si)),
+                  key=lambda i: float(ep.degree[i]))
+        if float(r_on[hub] / r_on.sum()) < float(r_off[hub] / r_off.sum()): demoted += 1
+    assert changed >= 1 and demoted >= 1                    # genericity bites on at least one seed
