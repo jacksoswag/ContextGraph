@@ -61,7 +61,10 @@ def _grow_set(store: _StoreProto, seeds: list[str], cfg: FieldConfig) -> tuple[s
                 seen.add(v); weight[v] = w; heapq.heappush(heap, (-w, next(cnt), v, lvl + 1))
             else: weight[v] = max(weight[v], w)
         for v in dn_outs:
-            w = base
+            # DOWN children inherit the parent e_ node's weight (not the decayed base) — they are
+            # structural connectors (edge endpoints), not lateral hops, so must not be evicted by
+            # N_max when the e_ node itself survives (a disconnected e_ node has no coupling).
+            w = -_negw
             if v not in seen:
                 seen.add(v); weight[v] = w; heapq.heappush(heap, (-w, next(cnt), v, lvl))
             else: weight[v] = max(weight[v], w)
