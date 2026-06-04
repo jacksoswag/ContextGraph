@@ -1,0 +1,59 @@
+############ GATE 3: bridge bench, MERGED wikidata ############
+Store: .di-ui/graph.wikidata.merged.sqlite
+relational bridge queries used: 201
+
+  cond             bridge_cov  median  wins_vs_pprR2
+  field2           0.761      1.000   24/201
+  field2_struct    0.782      1.000   25/201
+  ppr2             0.904      1.000   53/201
+  pprR2            0.799      1.000   0/201
+  field1           0.833      1.000   42/201
+
+field2 - ppr2 (linear superposition): mean=-0.143  field_wins=17/201  ties=127
+
+############ GATE 2+3: 1hop/2hop coverage, UNMERGED wikidata ############
+Store: .di-ui/graph.wikidata.sqlite
+Questions: 80 1-hop, 185 2-hop
+
+
+── 1hop results (n=80) ──
+  cond       mean_cov  median  p25   p75
+  field      0.962    1.000  1.000  1.000
+  field_struct 0.962    1.000  1.000  1.000
+  ppr        0.977    1.000  1.000  1.000
+  pprR       0.866    1.000  1.000  1.000
+
+── 2hop results (n=185) ──
+  cond       mean_cov  median  p25   p75
+  field      0.360    0.143  0.000  1.000
+  field_struct 0.361    0.143  0.000  1.000
+  ppr        0.356    0.143  0.000  1.000
+  pprR       0.323    0.143  0.000  0.500
+
+field - pprR delta (1hop): mean=+0.097  field_wins=13/80
+
+field - pprR delta (2hop): mean=+0.037  field_wins=19/185
+
+############ GATE 2+3: 1hop/2hop coverage, MERGED wikidata ############
+Store: .di-ui/graph.wikidata.merged.sqlite
+Questions: 80 1-hop, 160 2-hop
+
+
+── 1hop results (n=80) ──
+  cond       mean_cov  median  p25   p75
+  field      0.952    1.000  1.000  1.000
+  field_struct 0.947    1.000  1.000  1.000
+  ppr        0.948    1.000  1.000  1.000
+  pprR       0.827    1.000  1.000  1.000
+
+── 2hop results (n=160) ──
+  cond       mean_cov  median  p25   p75
+  field      0.362    0.155  0.000  1.000
+  field_struct 0.365    0.167  0.000  1.000
+  ppr        0.368    0.167  0.000  1.000
+  pprR       0.345    0.113  0.000  0.714
+
+field - pprR delta (1hop): mean=+0.125  field_wins=20/80
+
+field - pprR delta (2hop): mean=+0.017  field_wins=13/160
+############ ALL DONE ############
