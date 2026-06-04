@@ -15,8 +15,8 @@ class _Store:
 # a mesh whose node_ids are exactly `ids` (relevance-flat; respond only reads node_ids).
 def _mesh(ids):
     n = len(ids)
-    return Mesh(nodes=list(range(n)), node_ids=list(ids), relevance={i: 1.0 for i in range(n)},
-                parent={i: -1 for i in range(n)}, layer={i: 0 for i in range(n)}, seed_roots=[0])
+    return Mesh(nodes=list(range(n)), node_ids=list(ids),
+                relevance={i: 1.0 for i in range(n)}, seed_roots=[0])
 
 def _stub(monkeypatch, *, seeds, mesh, prose="ANSWER"):
     monkeypatch.setattr(loop_mod, "interpret", lambda q, s, **k: {"seeds": seeds, "intent": "the intent"})

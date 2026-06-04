@@ -28,40 +28,32 @@ REFINE_PROMPT = (
     "definition ('the number of ... was N').\n"
     'Return JSON: {{"statements": ["...", "..."], "intent": "..."}}\n\nQuery: {query}')
 
-# render_outline: the Mesh as a SEED-ROOTED indented tree, straight from the field's flow-provenance parent
-# map — each child elaborates or is contained-by its parent fact, so the hyperedge containment + entity-
-# chaining the flat bullet list flattens away reaches the LLM as STRUCTURE (the shape of the gathered region,
-# how it hangs off the seed), not just an unordered fact dump. Same surfaces. Returns (outline_text, ids).
-def render_outline(mesh: Mesh, store, max_nodes: int = 80) -> tuple[str, list[str]]:
-    def _t(nid): return (store.text(nid) or nid).split("|")[0]
-    idx_id = dict(zip(mesh.nodes, mesh.node_ids)); id_idx = {v: k for k, v in idx_id.items()}
-    sel = list(mesh.nodes[:max_nodes]); selset = set(sel)
-    kids: dict[int, list[int]] = {}; roots: list[int] = []
-    for i in sel:                                              # sel is relevance-descending → siblings stay ranked
-        p = mesh.parent.get(i, -1)
-        if p == -1 or p not in selset: roots.append(i)
-        else: kids.setdefault(p, []).append(i)
-    lines: list[str] = []; ids: list[str] = []; seen: set[int] = set()
-    # an edge child sharing an endpoint with its parent renders as "[rel] → other" (the connection, not the
-    # restated parent). If that other endpoint is itself a mesh node, FOLD it in here — render its subtree
-    # under the connection, relative to it — so it isn't ALSO listed bare (kills the duplication). Connection
-    # children are walked before bare ones so the fold wins the race for the shared node.
-    def walk(i, depth, par_id):
-        if i in seen: return
-        seen.add(i); nid = idx_id[i]; tri = store.triple(nid); fold = None
-        if tri and par_id and par_id in (tri[0], tri[2]):
-            other = tri[2] if tri[0] == par_id else tri[0]
-            lab = f"[{tri[1]}] {'→' if tri[0] == par_id else '←'} {_t(other)}"
-            if other in id_idx and id_idx[other] in selset and id_idx[other] not in seen: fold = id_idx[other]
-        else: lab = _t(nid)
-        lines.append("  " * depth + f"- {lab}"); ids.append(nid)
-        if fold is not None: seen.add(fold)
-        conn = lambda c: (lambda tc: bool(tc and nid in (tc[0], tc[2])))(store.triple(idx_id[c]))
-        for c in sorted(kids.get(i, []), key=lambda c: 0 if conn(c) else 1): walk(c, depth + 1, nid)
-        if fold is not None:
-            for c in kids.get(fold, []): walk(c, depth + 1, idx_id[fold])
-    for r in roots: walk(r, 0, None)
-    return ("\n".join(lines) or "(empty)"), ids
+_EVENT = "[event]"   # objectless/intransitive endpoint — elided to just the relation (mirrors astro_bench._node)
+
+# render_props: the gathered region as the corpus's nested-PROPOSITION lines (astro_bench._node form),
+# one bullet per ROOT edge — a mesh e_ edge no OTHER mesh edge contains (children are written out by the
+# recursion, so a nested fact never also lists bare). A plain fact renders (subj -rel- obj); a fact→fact
+# connection renders (factA) =rel=> (factB): the OUTERMOST relation is =rel=>, deeper ones -rel-. An
+# [event] endpoint elides to (subj -rel-) / (-rel- obj). Same surfaces as render_outline; only the shape
+# differs (recursive parens vs indented tree). Returns the rendered block.
+def render_props(mesh: Mesh, store, max_nodes: int = 80) -> str:
+    ids = [n for n in mesh.node_ids[:max_nodes] if n.startswith("e_")]; idset = set(ids)
+    contained = {c for e in ids for c in (store.children(e) or ()) if c in idset}
+    roots = [e for e in ids if e not in contained]        # relevance order preserved
+    return "\n".join(f"- {_prop(store, e, top=True)}" for e in roots) or "(empty)"
+
+# _prop: recursive endpoint render — node → its text; edge → (src rel tgt), recursing into nested facts.
+# top marks the OUTERMOST fact→fact relation with =rel=> (the corpus connection form); below it is -rel-.
+def _prop(store, nid: str, top: bool = False) -> str:
+    tri = store.triple(nid)
+    if tri is None: return store.text(nid) or nid
+    s, rel, t = tri
+    if not t: return f"({_prop(store, s)} -{rel}-)"        # unary intransitive (empty target)
+    sr, tr = _prop(store, s), _prop(store, t)
+    if top and s.startswith("e_") and t.startswith("e_"): return f"({sr}) ={rel}=> ({tr})"
+    if tr == _EVENT: return f"({sr} -{rel}-)"
+    if sr == _EVENT: return f"(-{rel}- {tr})"
+    return f"({sr} -{rel}- {tr})"
 
 def _is_dict(d) -> bool: return isinstance(d, dict)
 

@@ -62,11 +62,17 @@ def test_containment_makes_fact_content_reachable(hyper_store):
     assert float(on[i_cancer]) > float(off[i_cancer])
     assert float(on[i_smoke]) > 0.0 and float(on[i_cancer]) > 0.0
 
-def test_node_only_store_has_no_hyperedges(tmp_path):
-    # Flat dyadic store ⇒ empty hyperedges ⇒ unchanged pre-hyperedge behavior.
+def test_flat_store_fact_materializes_as_hyperedge(tmp_path):
+    # _grow_set via containing_edges exposes the reified edge (e_dc) + its endpoints — the fact
+    # "dog chase cat" becomes a hyperedge triple (e_dc, dog, cat). No nested e_ as endpoint here;
+    # all three members are present, so one hyperedge group is recorded.
     path = str(tmp_path / "g.sqlite")
     with GraphWriter(path) as w:
         w.write_clauses([_edge(_node("dog"), "chase", _node("cat"))])
     with GraphStore(path) as s:
         ep, _ = materialize(s, [node_id("dog")], DEFAULT_CFG)
-    assert ep.hyperedges == []
+    ids = set(ep.node_ids)
+    e_dc = edge_id(node_id("dog"), "chase", node_id("cat"))
+    assert {node_id("dog"), node_id("cat"), e_dc} <= ids
+    members = [set(ep.node_ids[i] for i in grp) for grp, _w in ep.hyperedges]
+    assert {e_dc, node_id("dog"), node_id("cat")} in members

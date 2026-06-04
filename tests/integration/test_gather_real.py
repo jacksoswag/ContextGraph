@@ -42,8 +42,11 @@ def test_real_gather_locality_within_k_hop(store, word):
     dist = hop_distances(res.ep, res.seed_idx)
     rel = res.relevance()
     mx = float(rel.max())
-    hot = [i for i in range(len(res.ep.node_ids)) if float(rel[i]) >= 0.05 * mx]
-    assert all(0 <= dist[i] <= 2 for i in hot), f"{word}: hot node beyond k_hop reach"
+    # e_ (reified fact) nodes enter via containment, not lateral hops — hop_distances returns -1
+    # for them since neighbors() has no edges from e_ ids. Only check regular entity nodes (n_).
+    hot = [i for i in range(len(res.ep.node_ids))
+           if float(rel[i]) >= 0.05 * mx and not res.ep.node_ids[i].startswith("e_")]
+    assert all(0 <= dist[i] <= 2 for i in hot), f"{word}: hot entity beyond k_hop reach"
 
 def test_real_gather_deterministic(store):
     sid = store.find("france", 1)

@@ -3,7 +3,8 @@ from __future__ import annotations
 # multifaceted seeds. Contract-tested with a deterministic mock LLM + an injected parse stub (no spaCy,
 # no backend). render_outline is covered by the gather/behavior tests.
 import pytest
-from field.seams import interpret, _spacy_fragments, _is_meta, _pick_seeds
+from field.seams import interpret, _spacy_fragments, _is_meta, _pick_seeds, render_props
+from field.gather import Mesh
 
 # minimal store double: text→node-id resolution (no anchor ⇒ _select_seeds keeps every candidate).
 class FakeStore:
@@ -126,3 +127,44 @@ def test_pick_seeds_caps_at_max():
     facets = [[f"n{i}"] for i in range(10)]
     score = {f"n{i}": 1.0 - 0.01 * i for i in range(10)}
     assert len(_pick_seeds(facets, score, {f"n{i}": f"entity{i}" for i in range(10)}, 4)) == 4
+
+# ── render_props: corpus nested-proposition form (recursive parens, =rel=> top / -rel- nested) ─────────
+
+# store double exposing the reified-edge accessors render_props reads: triple, children, text.
+class FakeGraph:
+    def __init__(self, nodes, edges): self._n = nodes; self._e = edges   # nid→text, eid→(s,rel,t)
+    def triple(self, nid): return self._e.get(nid)
+    def children(self, nid): e = self._e.get(nid); return tuple(x for x in (e[0], e[2]) if x) if e else None
+    def text(self, nid):
+        if nid in self._n: return self._n[nid]
+        e = self._e.get(nid)
+        return f"{self.text(e[0])} {e[1]} {self.text(e[2])}" if e else nid
+
+def _mesh(ids): return Mesh([], list(ids), {}, [])   # only node_ids is read by render_props
+
+def test_render_props_connection_nests_and_uses_arrow():
+    store = FakeGraph({"n_a": "system", "n_b": "limit", "n_c": "cmbr", "n_d": "novel"},
+                      {"e_f1": ("n_a", "give", "n_b"), "e_f2": ("n_c", "in", "n_d"),
+                       "e_c": ("e_f1", "precede", "e_f2")})
+    # only the connection is a ROOT; its two facts are written out nested, not as bare bullets
+    assert render_props(_mesh(["e_c", "e_f1", "e_f2"]), store) == \
+        "- ((system -give- limit)) =precede=> ((cmbr -in- novel))"
+
+def test_render_props_standalone_fact():
+    store = FakeGraph({"n_a": "helium", "n_b": "abundant element"}, {"e_f": ("n_a", "be", "n_b")})
+    assert render_props(_mesh(["e_f"]), store) == "- (helium -be- abundant element)"
+
+def test_render_props_event_endpoint_elided_to_relation():
+    store = FakeGraph({"n_a": "ocean", "n_ev": "[event]"}, {"e_f": ("n_a", "dry", "n_ev")})
+    assert render_props(_mesh(["e_f"]), store) == "- (ocean -dry-)"
+
+def test_render_props_unary_intransitive_empty_target():
+    # DI_KEEP_INTRANSITIVE stores intransitives with an empty target → renders as (subj -rel-)
+    store = FakeGraph({"n_a": "star"}, {"e_u": ("n_a", "emit", "")})
+    assert render_props(_mesh(["e_u"]), store) == "- (star -emit-)"
+
+def test_render_props_deep_nesting_recurses():
+    # o3: a fact whose object is itself a fact → inner proposition rendered in full, -rel- throughout
+    store = FakeGraph({"n_a": "carl", "n_b": "olber", "n_c": "paradox"},
+                      {"e_in": ("n_b", "have", "n_c"), "e_out": ("n_a", "argue", "e_in")})
+    assert render_props(_mesh(["e_out", "e_in"]), store) == "- (carl -argue- (olber -have- paradox))"
