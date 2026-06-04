@@ -16,11 +16,21 @@ from graph import GraphStore
 from embed import EMBED_DIM
 
 # vec0 virtual tables are unreadable without the extension loaded on the connection.
+_HAS_VEC = False
 def _connect(path):
+    global _HAS_VEC
     con = sqlite3.connect(path)
-    import sqlite_vec
-    con.enable_load_extension(True); sqlite_vec.load(con)
+    try:
+        import sqlite_vec
+        con.enable_load_extension(True); sqlite_vec.load(con); _HAS_VEC = True
+    except Exception:
+        pass
     return con
+
+def _vec_count(con, table):
+    # skip vec-table assertions when sqlite_vec isn't loadable on this Python build
+    try: return con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+    except sqlite3.OperationalError: return None
 
 
 # A node clause-edge and a nested hyperedge, built directly so the test does not
@@ -43,7 +53,8 @@ def test_writer_creates_nodes_edges_with_embeddings_and_indexes(tmp_path):
     assert con.execute("SELECT length(info_vector) FROM edges").fetchone()[0] == EMBED_DIM * 4
     # FTS + vec are populated and queryable
     assert con.execute("SELECT count(*) FROM nodes_fts").fetchone()[0] == 2
-    assert con.execute("SELECT count(*) FROM nodes_vec").fetchone()[0] == 2
+    vc = _vec_count(con, "nodes_vec")
+    if vc is not None: assert vc == 2
     con.close()
     # the field's read path sees it
     with GraphStore(path) as s:
@@ -64,7 +75,8 @@ def test_writer_is_idempotent(tmp_path):
     assert con.execute("SELECT count(*) FROM nodes").fetchone()[0] == 2
     assert con.execute("SELECT count(*) FROM edges").fetchone()[0] == 1
     assert con.execute("SELECT count(*) FROM nodes_fts").fetchone()[0] == 2   # no FTS dup
-    assert con.execute("SELECT count(*) FROM nodes_vec").fetchone()[0] == 2   # no vec dup
+    vc = _vec_count(con, "nodes_vec")
+    if vc is not None: assert vc == 2                                         # no vec dup
     # re-ingest bumps observation count rather than duplicating
     assert con.execute("SELECT count FROM edges").fetchone()[0] == 2
     con.close()
@@ -89,6 +101,49 @@ def test_hyperedge_target_is_reified_as_edge_endpoint(tmp_path):
     inner_row = con.execute("SELECT length(info_vector) FROM edges WHERE id=?", (t_id,)).fetchone()
     assert inner_row and inner_row[0] == EMBED_DIM * 4
     con.close()
+
+
+def test_intransitive_dropped_by_default(tmp_path):
+    # "star emits [event]" — no object: default writer drops the whole edge (current behavior)
+    path = str(tmp_path / "g.sqlite")
+    with GraphWriter(path) as w:
+        stats = w.write_clauses([_edge(_node("star"), "emit", _node("[event]", "X"))])
+    assert stats["edges"] == 0
+
+
+def test_keep_intransitive_stores_unary_edge(tmp_path):
+    # DI_KEEP_INTRANSITIVE: the intransitive clause survives as a UNARY edge (empty target)
+    path = str(tmp_path / "g.sqlite")
+    with GraphWriter(path, keep_intransitive=True) as w:
+        stats = w.write_clauses([_edge(_node("star"), "emit", _node("[event]", "X"))])
+    assert stats["edges"] == 1
+    con = _connect(path)
+    s_id, rel, t_id = con.execute("SELECT source_id, rel_type, target_id FROM edges").fetchone()
+    assert rel == "emit" and s_id.startswith("n_") and t_id == ""          # unary: empty target
+    assert con.execute("SELECT length(info_vector) FROM edges").fetchone()[0] == EMBED_DIM * 4
+    con.close()
+    with GraphStore(path) as s:
+        star = s.find("star", 1)[0]; eid = s.containing_edges(star)[0][0]
+        assert s.text(eid) == "star emit"                                  # renders without the [event] target
+        assert s.children(eid) == (star,)                                  # 1-tuple, not (star, "")
+        assert all(n for n, _ in s.neighbors(star))                        # no empty "" neighbor leaks
+
+
+def test_keep_intransitive_preserves_connection_over_it(tmp_path):
+    # the headline: a fact→fact connection whose source fact is intransitive survives instead of
+    # being dropped wholesale, and renders end-to-end with the unary elision.
+    from field.seams import _prop
+    factA = _edge(_node("star"), "emit", _node("[event]", "X"))            # intransitive leaf
+    factB = _edge(_node("gas"), "heat", _node("disk"))
+    conn = _edge(factA, "cause", factB, _connection=True)
+    path = str(tmp_path / "g.sqlite")
+    with GraphWriter(path, keep_intransitive=True) as w:
+        stats = w.write_clauses([conn])
+    assert stats["edges"] == 3                                             # factA (unary) + factB + connection
+    with GraphStore(path) as s:
+        conn_id = next(e for e, sid, _t in
+                       s._con.execute("SELECT id, source_id, target_id FROM edges").fetchall() if sid.startswith("e_"))
+        assert _prop(s, conn_id, top=True) == "((star -emit-)) =cause=> ((gas -heat- disk))"
 
 
 def test_ingest_text_runs_producer_and_writes(tmp_path):

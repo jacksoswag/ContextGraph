@@ -21,6 +21,15 @@ class MergeConfig:
     tau_mid: float = 0.82       # cosine floor for a structurally-confirmed merge
     tau_struct: float = 0.30    # shared-neighbor Jaccard required at mid cosine
     density_penalty: float = 0.012   # how much node genericity (log degree) raises tau_embed
+    # e_ (proposition) merge thresholds — tighter than nodes because merging distinct facts is worse
+    tau_embed_edge: float = 1.0     # high-specificity propositions: needs near-identical embedding
+    tau_mid_edge: float = 0.86      # low-specificity: merges with endpoint-cosine structural confirm
+    tau_struct_edge: float = 0.70   # endpoint agreement required at mid cosine (both src+tgt similar)
+    # centroid-distance specificity: weights for combining degree + semantic distance from generic centre
+    w_deg: float = 0.5          # weight for inverted-degree term in specificity score
+    w_dist: float = 0.5         # weight for centroid-distance term
+    centroid_scale: float = 0.8 # tanh scale for normalising centroid distance to [0,1]
+    centroid_top_k: int = 30    # how many highest-degree nodes define the generic centroid
 
 _SLEEP_LOG = (
     "CREATE TABLE IF NOT EXISTS sleep_log(id INTEGER PRIMARY KEY AUTOINCREMENT, pass_num INTEGER,"
@@ -36,6 +45,29 @@ def should_merge(*, cosine: float, lexical: float, structural: float, degree: in
     bar = cfg.tau_embed + cfg.density_penalty * math.log10(1.0 + max(0, degree))
     if cosine >= bar: return True
     if cosine >= cfg.tau_mid and structural >= cfg.tau_struct: return True
+    return False
+
+# specificity ∈ [0,1]: 1 = maximally specific (high bar), 0 = generic (low bar).
+# Combines inverted degree (structural) + distance from generic centroid (semantic).
+# centroid should be the mean unit-vector of the cfg.centroid_top_k highest-degree nodes.
+def _specificity(deg: int, emb: np.ndarray | None, centroid: np.ndarray | None, cfg: MergeConfig) -> float:
+    deg_term = 1.0 / (1.0 + math.log1p(max(0, deg)))   # ∈ (0,1], falls as deg rises
+    if emb is not None and centroid is not None:
+        dist = float(np.linalg.norm(emb - centroid))
+        dist_term = math.tanh(dist / max(cfg.centroid_scale, 1e-6))
+    else:
+        dist_term = deg_term   # no embedder: fall back to degree-only
+    return cfg.w_deg * deg_term + cfg.w_dist * dist_term
+
+# Merge decision for reified edge (e_) endpoints. Bar floats from tau_mid_edge (generic
+# proposition) to tau_embed_edge (specific) driven by the specificity of the lower-scoring
+# endpoint. Structural confirmation = endpoint cosine agreement (both src+tgt similar).
+def should_merge_edge(*, cosine: float, src_cos: float, tgt_cos: float,
+                      spec: float, cfg: MergeConfig) -> bool:
+    bar = cfg.tau_mid_edge + spec * (cfg.tau_embed_edge - cfg.tau_mid_edge)
+    if cosine >= bar: return True
+    if cosine >= cfg.tau_mid_edge and src_cos >= cfg.tau_struct_edge and tgt_cos >= cfg.tau_struct_edge:
+        return True
     return False
 
 # token Jaccard over whitespace tokens (surface lexical overlap; logged, not decisive)
@@ -81,33 +113,101 @@ class _UF:
         if ra != rb: self.p[ra] = rb
 
 
+# _knn: top-k nearest neighbours for query vector va from the pool dict {id: unit_vec}.
+# Uses nodes_vec ANN when available (sqlite_vec loaded on con), falls back to brute-force.
+def _knn(con: sqlite3.Connection, va: np.ndarray, pool: dict[str, np.ndarray],
+         k: int, prefix: str) -> list[str]:
+    try:
+        rows = con.execute("SELECT id, distance FROM nodes_vec WHERE info_vector MATCH ? "
+                           "AND k=? ORDER BY distance", (va.tobytes(), k + 1)).fetchall()
+        ids = [r[0] for r in rows if r[0] in pool]
+        if ids: return ids[:k]
+    except sqlite3.OperationalError:
+        pass
+    # brute-force fallback: cosine over pool
+    if not pool: return []
+    ids_list = list(pool)
+    sims = np.array([float(np.dot(va, pool[b])) for b in ids_list])
+    top = np.argsort(-sims)[:k]
+    return [ids_list[i] for i in top if ids_list[i].startswith(prefix)]
+
+# _build_centroid: mean unit-vector of the top-k highest-degree nodes — the "generic centre"
+# used by _specificity. Returns None if not enough vectors available.
+def _build_centroid(con: sqlite3.Connection, cfg: MergeConfig) -> np.ndarray | None:
+    rows = con.execute("""
+        SELECT n.id, n.info_vector FROM nodes n
+        WHERE n.info_vector IS NOT NULL
+        ORDER BY (SELECT COUNT(*) FROM edges WHERE source_id=n.id OR target_id=n.id) DESC
+        LIMIT ?""", (cfg.centroid_top_k,)).fetchall()
+    vecs = [_unpack(r[1]) for r in rows if r[1] is not None]
+    if not vecs: return None
+    c = np.mean(np.stack(vecs), axis=0).astype(np.float32)
+    norm = np.linalg.norm(c)
+    return c / norm if norm > 1e-9 else None
+
 # Generate (a,b) candidate pairs for the given node ids via vec KNN, score them, and keep
 # those should_merge accepts. Returns (accepted_pairs, scores) where scores[(a,b)] = (cos,lex,struct,deg).
+# Also handles e_ (proposition) pairs using should_merge_edge with centroid-based specificity.
 def _accept_pairs(con: sqlite3.Connection, node_ids: list[str], cfg: MergeConfig):
-    vecs: dict[str, np.ndarray] = {}
-    for nid in node_ids:
-        row = con.execute("SELECT info_vector FROM nodes WHERE id=?", (nid,)).fetchone()
-        v = _unpack(row[0]) if row else None
-        if v is not None and v.shape == (384,): vecs[nid] = v
+    all_vecs: dict[str, np.ndarray] = {}
+    for row in con.execute("SELECT id, info_vector FROM nodes WHERE info_vector IS NOT NULL").fetchall():
+        v = _unpack(row[1])
+        if v is not None and v.shape == (384,): all_vecs[row[0]] = v
+    candidate_set = set(node_ids)
+    n_vecs = {k: v for k, v in all_vecs.items() if k.startswith("n_")}
+    e_vecs = {k: v for k, v in all_vecs.items() if k.startswith("e_")}
+    centroid = _build_centroid(con, cfg)
     accepted: list[tuple[str, str]] = []
     scores: dict[tuple[str, str], tuple] = {}
     seen_pairs: set[tuple[str, str]] = set()
-    for a, va in vecs.items():
-        rows = con.execute("SELECT id, distance FROM nodes_vec WHERE info_vector MATCH ? "
-                           "AND k=? ORDER BY distance", (va.tobytes(), cfg.candidates + 1)).fetchall()
-        for b, _dist in rows:
-            if b == a or not b.startswith("n_") or b not in vecs: continue
-            pair = (a, b) if a < b else (b, a)
-            if pair in seen_pairs: continue
-            seen_pairs.add(pair)
-            ta = con.execute("SELECT text FROM nodes WHERE id=?", (pair[0],)).fetchone()
-            tb = con.execute("SELECT text FROM nodes WHERE id=?", (pair[1],)).fetchone()
-            cos = _cosine(vecs[pair[0]], vecs[pair[1]])
-            lex = lexical_sim(ta[0] if ta else "", tb[0] if tb else "")
-            struct = structural_sim(con, pair[0], pair[1])
-            deg = max(_degree(con, pair[0]), _degree(con, pair[1]))
-            if should_merge(cosine=cos, lexical=lex, structural=struct, degree=deg, cfg=cfg):
-                accepted.append(pair); scores[pair] = (cos, lex, struct, deg)
+
+    def _score_n_pair(a, b):
+        pair = (a, b) if a < b else (b, a)
+        if pair in seen_pairs or pair[0] not in candidate_set and pair[1] not in candidate_set: return
+        seen_pairs.add(pair)
+        ta = con.execute("SELECT text FROM nodes WHERE id=?", (pair[0],)).fetchone()
+        tb = con.execute("SELECT text FROM nodes WHERE id=?", (pair[1],)).fetchone()
+        cos = _cosine(n_vecs[pair[0]], n_vecs[pair[1]])
+        lex = lexical_sim(ta[0] if ta else "", tb[0] if tb else "")
+        struct = structural_sim(con, pair[0], pair[1])
+        deg = max(_degree(con, pair[0]), _degree(con, pair[1]))
+        if should_merge(cosine=cos, lexical=lex, structural=struct, degree=deg, cfg=cfg):
+            accepted.append(pair); scores[pair] = (cos, lex, struct, deg)
+
+    def _score_e_pair(a, b):
+        pair = (a, b) if a < b else (b, a)
+        if pair in seen_pairs or pair[0] not in candidate_set and pair[1] not in candidate_set: return
+        seen_pairs.add(pair)
+        va, vb = e_vecs[pair[0]], e_vecs[pair[1]]
+        cos = _cosine(va, vb)
+        if cos < cfg.tau_mid_edge: return   # fast reject
+        # endpoint agreement: fetch src/tgt vectors for both edges
+        def _ep_vecs(eid):
+            row = con.execute("SELECT source_id, target_id FROM edges WHERE id=?", (eid,)).fetchone()
+            if not row: return None, None
+            sv = all_vecs.get(row[0]); tv = all_vecs.get(row[1])
+            return sv, tv
+        sa, ta_v = _ep_vecs(pair[0]); sb, tb_v = _ep_vecs(pair[1])
+        src_cos = _cosine(sa, sb) if sa is not None and sb is not None else 0.0
+        tgt_cos = _cosine(ta_v, tb_v) if ta_v is not None and tb_v is not None else 0.0
+        # specificity: use minimum of the two edges' endpoint degrees (weakest link)
+        deg_a = max(_degree(con, pair[0]), 1); deg_b = max(_degree(con, pair[1]), 1)
+        spec = _specificity(min(deg_a, deg_b), vb, centroid, cfg)
+        if should_merge_edge(cosine=cos, src_cos=src_cos, tgt_cos=tgt_cos, spec=spec, cfg=cfg):
+            ra = con.execute("SELECT text FROM nodes WHERE id=?", (pair[0],)).fetchone()
+            rb = con.execute("SELECT text FROM nodes WHERE id=?", (pair[1],)).fetchone()
+            lex = lexical_sim(ra[0] if ra else "", rb[0] if rb else "")
+            accepted.append(pair); scores[pair] = (cos, lex, src_cos, deg_a)
+
+    # node pairs
+    for a, va in {k: v for k, v in n_vecs.items() if k in candidate_set}.items():
+        for b in _knn(con, va, n_vecs, cfg.candidates, "n_"):
+            if b != a: _score_n_pair(a, b)
+    # edge (e_) pairs — only if candidates include e_ ids
+    e_candidates = {k: v for k, v in e_vecs.items() if k in candidate_set}
+    for a, va in e_candidates.items():
+        for b in _knn(con, va, e_vecs, cfg.candidates, "e_"):
+            if b != a: _score_e_pair(a, b)
     return accepted, scores
 
 
@@ -139,7 +239,9 @@ def _dedup_edges(con):
             "SELECT id, source_id, rel_type, target_id, count FROM edges").fetchall():
         if s == t:
             con.execute("DELETE FROM edges WHERE id=?", (eid,))
-            con.execute("DELETE FROM edges_vec WHERE id=?", (eid,)); continue
+            try: con.execute("DELETE FROM edges_vec WHERE id=?", (eid,))
+            except sqlite3.OperationalError: pass
+            continue
         key = (s, rel, t)
         if key in keep:
             con.execute("UPDATE edges SET count=count+? WHERE id=?", (cnt or 1, keep[key]))
@@ -154,7 +256,7 @@ def _dedup_edges(con):
 # any near node). Used by batch (all nodes) and live (new nodes). Mutates con; caller commits.
 def merge_nodes(con: sqlite3.Connection, node_ids: list[str], cfg: MergeConfig, *, pass_num: int = 1) -> dict:
     con.execute(_SLEEP_LOG)
-    accepted, scores = _accept_pairs(con, [n for n in node_ids if n.startswith("n_")], cfg)
+    accepted, scores = _accept_pairs(con, [n for n in node_ids if n.startswith(("n_", "e_"))], cfg)
     if not accepted: return {"merged": 0, "clusters": 0}
     uf = _UF()
     for a, b in accepted: uf.union(a, b)

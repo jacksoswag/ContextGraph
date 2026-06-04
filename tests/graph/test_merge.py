@@ -12,15 +12,21 @@ SRC = Path(__file__).resolve().parents[2] / "src"
 if str(SRC) not in sys.path: sys.path.insert(0, str(SRC))
 
 from graph.writer import GraphWriter, node_id
-from graph.merge import MergeConfig, should_merge, lexical_sim, merge_store
+from graph.merge import (MergeConfig, should_merge, should_merge_edge,
+                         lexical_sim, merge_store, _specificity)
 from graph import GraphStore
 
 def _n(t): return {"type": "node", "text": t, "pos": "NOUN"}
 def _e(s, r, t): return {"type": "edge", "rel": r, "source": s, "target": t,
                          "_source_text": "x", "_clause_text": "x"}
 def _connect(path):
-    con = sqlite3.connect(path); import sqlite_vec
-    con.enable_load_extension(True); sqlite_vec.load(con); return con
+    con = sqlite3.connect(path)
+    try:
+        import sqlite_vec
+        con.enable_load_extension(True); sqlite_vec.load(con)
+    except Exception:
+        pass
+    return con
 
 
 def test_should_merge_decision_logic():
@@ -63,6 +69,39 @@ def test_merge_folds_text_repoints_edges_and_logs(tmp_path, monkeypatch):
     log = con.execute("SELECT victim_id, canonical_id, cosine FROM sleep_log").fetchall()
     assert log and all(v != c for v, c, _cos in log)
     con.close()
+
+
+def test_should_merge_edge_specificity_gates_threshold():
+    import numpy as np
+    cfg = MergeConfig()
+    # generic proposition (low specificity) → bar near tau_mid_edge (0.86); merges at 0.87
+    assert should_merge_edge(cosine=0.87, src_cos=0.0, tgt_cos=0.0, spec=0.0, cfg=cfg)
+    # specific proposition (high specificity) → bar near tau_embed_edge (1.0); 0.87 does NOT merge
+    assert not should_merge_edge(cosine=0.87, src_cos=0.0, tgt_cos=0.0, spec=1.0, cfg=cfg)
+    # mid cosine but both endpoint cosines above tau_struct_edge → structural confirm merges
+    assert should_merge_edge(cosine=0.88, src_cos=0.72, tgt_cos=0.75, spec=0.5, cfg=cfg)
+    # mid cosine but one endpoint too different → no merge
+    assert not should_merge_edge(cosine=0.88, src_cos=0.72, tgt_cos=0.40, spec=0.5, cfg=cfg)
+
+
+def test_specificity_inverts_with_degree():
+    import numpy as np
+    cfg = MergeConfig()
+    # high degree → low specificity (generic, easy to merge)
+    s_low = _specificity(1000, None, None, cfg)
+    # low degree → high specificity (specific, hard to merge)
+    s_high = _specificity(1, None, None, cfg)
+    assert s_high > s_low
+
+def test_specificity_centroid_distance_raises_score():
+    import numpy as np
+    cfg = MergeConfig()
+    centroid = np.ones(384, dtype=np.float32) / np.sqrt(384)
+    far = np.zeros(384, dtype=np.float32); far[0] = 1.0   # orthogonal to centroid
+    near = centroid.copy()
+    s_far = _specificity(5, far, centroid, cfg)
+    s_near = _specificity(5, near, centroid, cfg)
+    assert s_far > s_near   # farther from generic centroid = more specific
 
 
 def test_merge_is_idempotent(tmp_path, monkeypatch):
