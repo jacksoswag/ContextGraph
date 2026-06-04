@@ -42,7 +42,8 @@ class Response:
 def gather_context(store, query: str, seeds: list[str], cfg: FieldConfig = GATHER_CFG) -> Mesh | None:
     ep, si = materialize(store, seeds, cfg)
     if not ep.node_ids: return None
-    res = gather(ep, si, cfg, lean=True)
+    ew = getattr(store, "struct_edge_weights", lambda: None)()
+    res = gather(ep, si, cfg, weights=ew, lean=True)
     qb = embed(query); qv = unpack(qb) if qb is not None else None
     qvt = torch.tensor(qv) if qv is not None else None
     return build_mesh(res, top_k=cfg.target_size, query_vec=qvt, query_w=QUERY_W)
