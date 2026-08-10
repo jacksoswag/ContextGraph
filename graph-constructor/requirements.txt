@@ -1,0 +1,9 @@
+# Topic -> articles -> spaCy relations -> embeddings -> SQLite.
+requests>=2.31              # article fetching (Wikipedia, arXiv, serper.dev)
+spacy>=3.5.0,<3.6.0         # dependency-parse relation extraction
+sentence-transformers>=2.2  # per-triple embeddings
+numpy>=1.24,<2.0.0          # vector blobs
+trafilatura>=1.6            # optional: full-text extraction for --google results
+
+# After installing, fetch the spaCy model the extractor loads:
+#   python -m spacy download en_core_web_sm

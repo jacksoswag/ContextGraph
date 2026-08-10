@@ -8,3 +8,9 @@ word_info_map.sqlite3*
 physics_engine
 thought_engine
 .DS_Store
+data/raw/corpus/
+data/raw/corpus_v2/
+data/graph/
+data/graph_v2/
+.claude/settings.local.json
+graph-constructor/vocab.sqlite3

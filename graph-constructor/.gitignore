@@ -1,0 +1,67 @@
+# --- Secrets (never commit) ---
+.env
+.env.*
+*.pem
+*.key
+*.p12
+id_rsa*
+*credentials*
+*credential*
+*secret*
+README.orig.md
+
+# --- Python dependencies / virtualenvs ---
+venv/
+.venv/
+env/
+ENV/
+.Python
+pip-wheel-metadata/
+
+# --- Python build / cache ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.build/
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Generic build output (other stacks) ---
+target/
+DerivedData/
+.next/
+Obj/
+
+# --- Unity (if ever applicable) ---
+Library/
+Temp/
+Logs/
+UserSettings/
+
+# --- Large model / binary artifacts ---
+*.mlmodelc
+*.mlpackage
+*.bin
+*.safetensors
+*.ckpt
+*.pt
+*.onnx
+*.gguf
+*.metallib
+*.dylib
+*.so
+
+# --- Local data / generated databases ---
+*.sqlite
+*.sqlite3
+*.db
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
