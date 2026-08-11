@@ -4,7 +4,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 SRC = PROJECT_ROOT / "src"
 for _p in (str(SRC), str(PROJECT_ROOT)):
     if _p not in sys.path: sys.path.insert(0, _p)
-ENV_PATH = Path(os.environ.get("BRAIN_ENV_PATH") or PROJECT_ROOT / ".env"); load_dotenv(ENV_PATH)
+ENV_PATH = Path(os.environ.get("CONTEXTGRAPH_ENV_PATH") or PROJECT_ROOT / ".env"); load_dotenv(ENV_PATH)
 from engine.common.constants import (AGENT_POSITION_RECORD_BYTES, COMMAND_SHM_BYTES,CONNECTION_COUNT_BYTES, CONNECTION_RECORD_SIZE,DASHBOARD_PORT, DASHBOARD_URL, EXTRACTION_THREADS, LOG_DIR, MAX_AGENTS,MAX_CONNECTIONS, PHASE_IDLE,PHASE_PHYSICS, PHASE_RESEARCH, PHASE_STABLE, PHASE_SYNTHESIS, PHASE_THINKING, REPORT_SHM_BYTES, SCRAPE_THREADS, STATUS_SHM_BYTES)
 from engine.common.shm import remove_shm_from_resource_tracker, ensure_port_free, create_shm, write_report
 if __name__ == "__main__": remove_shm_from_resource_tracker()
@@ -59,7 +59,7 @@ def launch_webapp(names_dict): # Launches clean web UI (localhost:8000)
     return subprocess.Popen(cmd, env=env, cwd=PROJECT_ROOT) # opens
 # Starts the native physics engine against the active shared-memory segments.
 def launch_physics(names_dict): # calls c++ to launch physics
-    physics_binary = Path(os.environ.get("BRAIN_PHYSICS_ENGINE") or PROJECT_ROOT / "venv" / "physics-engine"); print(f"[SYSTEM] Launching C++ Physics Engine ({os.path.basename(physics_binary)})"); env = os.environ.copy(); env["SHM_POS"]         = names_dict["pos"]; env["SHM_CONNECTIONS"] = names_dict["connections"]; env["SHM_STATUS"]      = names_dict["status"]
+    physics_binary = Path(os.environ.get("CONTEXTGRAPH_PHYSICS_ENGINE") or PROJECT_ROOT / "venv" / "physics-engine"); print(f"[SYSTEM] Launching C++ Physics Engine ({os.path.basename(physics_binary)})"); env = os.environ.copy(); env["SHM_POS"]         = names_dict["pos"]; env["SHM_CONNECTIONS"] = names_dict["connections"]; env["SHM_STATUS"]      = names_dict["status"]
     return subprocess.Popen([str(physics_binary)], env=env, cwd=PROJECT_ROOT) # opens
 # Asks runtime pruning to keep the physics-resolved graph that can support thought routes.
 def prune_after_physics(runtime_api):
@@ -86,7 +86,7 @@ def manage_shm(): # pos_shm: agent positions, connection_shm: connection data, c
     return names, anchors # stores it in raw bytes
 # Bootstraps workers, dashboard, physics, thinking, and synthesis phases for one engine session.
 def main():
-    os.environ["PYTHONUNBUFFERED"] = "1"; log_tee = StartupLogTee(_startup_log_path()); log_path = log_tee.start(); os.environ["BRAIN_LOG_PATH"] = str(log_path); print(f"[SYSTEM] Logging debug output to {log_path}")
+    os.environ["PYTHONUNBUFFERED"] = "1"; log_tee = StartupLogTee(_startup_log_path()); log_path = log_tee.start(); os.environ["CONTEXTGRAPH_LOG_PATH"] = str(log_path); print(f"[SYSTEM] Logging debug output to {log_path}")
     runtime_api, engine_thread, server_proc, physics_proc = None, None, None, None; scrapers, extractors = [], []
     shm_names, shm_handles = manage_shm() # initializes and returns shared memory
     status_shm, report_shm = shm_handles["status"],shm_handles["report"]
@@ -141,10 +141,10 @@ def main():
             if current_status == PHASE_STABLE:
                 print("[SYSTEM] Graph stabilized. Starting Thought Processes..."); status_shm.buf[0] = PHASE_THINKING
                 if runtime_api.launch_thought_workers(stop_event): print("[SYSTEM] Thought workers launched.")
-                else: print("[SYSTEM] Decentralized Intelligence is not ready to launch thought workers yet.")
+                else: print("[SYSTEM] ContextGraph is not ready to launch thought workers yet.")
             # Thinking -> Synthesis (Moving from analysis to report writing)
             if current_status == PHASE_THINKING:
-                if not engine_thread.is_alive(): raise RuntimeError("Decentralized Intelligence thread terminated during thought processing.")
+                if not engine_thread.is_alive(): raise RuntimeError("ContextGraph thread terminated during thought processing.")
                 if runtime_api.thought_workers_finished():
                     stats = runtime_api.thought_worker_stats(); print(f"[SYSTEM] Thought workers finished: {stats['endpoint']} at endpoints / {stats['dead']} dead / "
                         f"{stats.get('max_hops', 0)} max hops / {stats['successful']} successful.")

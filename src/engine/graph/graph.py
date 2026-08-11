@@ -4,7 +4,7 @@ from multiprocessing import shared_memory; from engine.agents.info import Info_A
 from engine.common.constants import AGENT_POSITION_RECORD_BYTES, AGENT_NEAR_PARENT_WEIGHT, AGENT_SPAWN_JITTER, MAX_MERGE_SIMILARITY, MAX_AGENTS, MIN_MERGE_SIMILARITY; from engine.extract.noise_cleanup import clean_agent_name, expand_clean_connection_record, is_usable_agent_text; from engine.extract.word_info_map import precache_text_vectors, str_to_vector, vector_specificity
 from engine.common.shm import flush_conn_log as util_flush_conn_log, clear_report as util_clear_report
 # Owns graph state and wires extraction, physics, thought routing, and synthesis together.
-class DecentralizedIntelligence:
+class ContextGraph:
     # Binds shared memory and initializes all in-memory graph, research, and route state.
     def __init__(self, shm_names):
         self.shm_pos         = shared_memory.SharedMemory(name=shm_names["pos"]); self.shm_connections = shared_memory.SharedMemory(name=shm_names["connections"]); self.shm_cmd         = shared_memory.SharedMemory(name=shm_names["command"]); self.shm_report      = shared_memory.SharedMemory(name=shm_names["report"])
@@ -46,7 +46,7 @@ class DecentralizedIntelligence:
     # Resets research state to a clean runtime state.
     def reset_research_state(self):
         self.stop_thought_workers(); self.reset_graph_state(); self.current_subqueries = []; self.target_a_queries = []; self.target_b_queries = []; self.bridge_queries = []; self.target_a_focus_phrases = []; self.target_b_focus_phrases = []; self.refinement_pass_queued = False; self.reset_text_reports()
-    # Loads dashboard targets into Decentralized Intelligence search queues and target anchor fields.
+    # Loads dashboard targets into ContextGraph search queues and target anchor fields.
     def prime_query_plan(self, query_plan):
         self.target_a_queries = thought_process.normalize_seed_queries((query_plan or {}).get("target_a_queries", [])); self.target_b_queries = thought_process.normalize_seed_queries((query_plan or {}).get("target_b_queries", [])); self.bridge_queries = thought_process.normalize_seed_queries((query_plan or {}).get("bridge_queries", []))
         self.target_a_focus_phrases = thought_process.normalize_seed_queries((query_plan or {}).get("target_a_focus_phrases", [])); self.target_b_focus_phrases = thought_process.normalize_seed_queries((query_plan or {}).get("target_b_focus_phrases", []))

@@ -1,5 +1,5 @@
 import json, os, sqlite3, time; from pathlib import Path; from queue import Empty; from urllib.parse import urlparse; import requests, trafilatura; from dotenv import load_dotenv; from engine.common.constants import MAX_CHARS_PER_BLOCK,MIN_EXTRACTABLE_BLOCK_CHARS,SCRAPE_CACHE_PATH,SCRAPE_DEFAULT_LIMIT,SERPER_PAGE_TIMEOUT,SERPER_RESULT_TIMEOUT
-from engine.extract.noise_cleanup import clean_text; load_dotenv(Path(os.environ.get("BRAIN_ENV_PATH") or Path(__file__).resolve().parents[3] / ".env")); WIKIPEDIA_OPENSEARCH_URL = "https://en.wikipedia.org/w/api.php"; SERPER_URL = "https://google.serper.dev/search"; CACHE_PATH = SCRAPE_CACHE_PATH; HEADERS = {"User-Agent": "decentralized-intelligence/1.0 (+https://localhost)"}
+from engine.extract.noise_cleanup import clean_text; load_dotenv(Path(os.environ.get("CONTEXTGRAPH_ENV_PATH") or Path(__file__).resolve().parents[3] / ".env")); WIKIPEDIA_OPENSEARCH_URL = "https://en.wikipedia.org/w/api.php"; SERPER_URL = "https://google.serper.dev/search"; CACHE_PATH = SCRAPE_CACHE_PATH; HEADERS = {"User-Agent": "ContextGraph/1.0 (+https://localhost)"}
 
 # Cleans url for scraping.
 def _clean_url(url):

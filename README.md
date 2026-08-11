@@ -1,4 +1,4 @@
-# context-graph
+# ContextGraph
 
 Give it two subjects. It searches the web for both, pulls the claims out of what it finds, builds a graph where the nodes are concepts and the edges are source-backed relationships, runs a physics simulation until that graph settles into a shape, walks paths through it looking for routes from one subject to the other, and writes a cited report about how they connect.
 
@@ -107,10 +107,10 @@ That installs raylib, builds the environment, pulls the spaCy model and `llama3.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SERPER_API_KEY` | none | Web search. Required. |
-| `BRAIN_RUNTIME_ROOT` | repo root | Where `logs/`, `sql/`, and `results/` land |
-| `BRAIN_ENV_PATH` | `.env` | Alternate credentials file |
-| `BRAIN_PHYSICS_ENGINE` | `venv/physics-engine` | Override the compiled binary |
-| `BRAIN_THOUGHT_ENGINE` | `venv/thought-engine` | Override the compiled binary |
+| `CONTEXTGRAPH_RUNTIME_ROOT` | repo root | Where `logs/`, `sql/`, and `results/` land |
+| `CONTEXTGRAPH_ENV_PATH` | `.env` | Alternate credentials file |
+| `CONTEXTGRAPH_PHYSICS_ENGINE` | `venv/physics-engine` | Override the compiled binary |
+| `CONTEXTGRAPH_THOUGHT_ENGINE` | `venv/thought-engine` | Override the compiled binary |
 
 ## Dashboard
 
@@ -124,9 +124,3 @@ That installs raylib, builds the environment, pulls the spaCy model and `llama3.
 | `WS /ws` | Live nodes, phase, and report text |
 
 `main.js` caps what it draws at 2,400 nodes and 3,600 edges. The backend holds far more than the browser can usefully render, so the cap is a display limit and not a graph limit.
-
-## Branches
-
-`main` is this, the version that settled in early May 2026 and works end to end.
-
-`experimental` is the research line that came after: reified hyperedges with their own store, an LLM-driven ingest pipeline that reads local files instead of scraping, and a field-dynamics layer that treats the graph as a continuous space rather than a set of nodes. It is measured but not finished, and the two lines do not share a data model.

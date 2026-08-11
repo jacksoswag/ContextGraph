@@ -27,7 +27,7 @@ def normalize_seed_queries(queries):
     return ordered
 
 # Scores lexical overlap between an agent label and a target phrase.
-def lexical_target_score(_brain, agent_name, target_text, require_distinctive=False):
+def lexical_target_score(_graph, agent_name, target_text, require_distinctive=False):
     agent_text = str(agent_name or "").strip().lower(); target_text = str(target_text or "").strip().lower()
     if not agent_text or not target_text: return 0.0
     agent_base_tokens = set(target_tokens(agent_text)); target_base_tokens = set(target_tokens(target_text)); agent_tokens = agent_base_tokens | (set(target_acronym_tokens(agent_text)) & target_base_tokens); target_tokens_set = target_base_tokens | (set(target_acronym_tokens(target_text)) & agent_base_tokens)
@@ -43,17 +43,17 @@ def lexical_target_score(_brain, agent_name, target_text, require_distinctive=Fa
     precision = len(overlap) / len(agent_tokens); recall = len(overlap) / len(target_tokens_set); distinctive_tokens = distinctive_target_tokens(target_tokens_set) if require_distinctive else set(); distinctive_coverage = (len(overlap & distinctive_tokens) / len(distinctive_tokens) if distinctive_tokens else 0.0)
     return max(precision, 0.8 * recall, distinctive_coverage)
 # Returns the active dashboard target text for side A or B.
-def target_text_for_side(brain, side):
+def target_text_for_side(graph, side):
     side = str(side or "").strip().lower()
     if side == "a":
-        return " ".join(str(getattr(brain, "current_target_a", "") or "").strip().split())
+        return " ".join(str(getattr(graph, "current_target_a", "") or "").strip().split())
     if side == "b":
-        return " ".join(str(getattr(brain, "current_target_b", "") or "").strip().split())
+        return " ".join(str(getattr(graph, "current_target_b", "") or "").strip().split())
     return ""
     
 # Returns normalized completion queries for one target side.
-def completion_queries_for_side(brain, side):
-    target = target_text_for_side(brain, side)
+def completion_queries_for_side(graph, side):
+    target = target_text_for_side(graph, side)
     return normalize_seed_queries([target])
 
 # Returns the two directed route specs used to bridge A to B and B to A.
@@ -103,15 +103,15 @@ def agent_grounding_texts(agent, connector_limit=18):
     return texts
 
 # Scores an agent against a target using all grounding text around that agent.
-def _agent_lexical_target_score(brain, agent, target_text, require_distinctive=False):
-    return max((lexical_target_score(brain, text, target_text, require_distinctive=require_distinctive,) for text in agent_grounding_texts(agent)), default=0.0,)
+def _agent_lexical_target_score(graph, agent, target_text, require_distinctive=False):
+    return max((lexical_target_score(graph, text, target_text, require_distinctive=require_distinctive,) for text in agent_grounding_texts(agent)), default=0.0,)
 
 # Scores the agent name against normalized target query variants.
-def _agent_name_target_score(brain, agent, queries, require_distinctive=False):
+def _agent_name_target_score(graph, agent, queries, require_distinctive=False):
     name = str(getattr(agent, "ASU", "") or "").strip()
     if not name:
         return 0.0
-    return max((lexical_target_score(brain, name, query, require_distinctive=require_distinctive,) for query in queries), default=0.0,)
+    return max((lexical_target_score(graph, name, query, require_distinctive=require_distinctive,) for query in queries), default=0.0,)
 
 # Scores whether an agent name is concise and noun-like enough to serve as an anchor.
 def _anchor_name_quality(name):
@@ -131,7 +131,7 @@ def _anchor_name_quality(name):
     return quality
 
 # Ranks agents by name similarity for thought routing.
-def _rank_agents_by_name_similarity(brain, queries, require_distinctive=False):
+def _rank_agents_by_name_similarity(graph, queries, require_distinctive=False):
     queries = normalize_seed_queries(queries)
     if not queries:
         return []
@@ -141,7 +141,7 @@ def _rank_agents_by_name_similarity(brain, queries, require_distinctive=False):
     except Exception:
         query_vecs = []
     ranked = []; seen_names = set()
-    for agent in brain.agents.values():
+    for agent in graph.agents.values():
         if not is_useful_thought_agent(agent):
             continue
         if not getattr(agent, "connectors", None):
@@ -152,7 +152,7 @@ def _rank_agents_by_name_similarity(brain, queries, require_distinctive=False):
         anchor_quality = _anchor_name_quality(name)
         if anchor_quality <= 0.0:
             continue
-        seen_names.add(name_key); lexical_score = max(_agent_lexical_target_score(brain, agent, query, require_distinctive=require_distinctive,) for query in queries); name_lexical_score = _agent_name_target_score(brain, agent, queries, require_distinctive=True,); vector_score = 0.0
+        seen_names.add(name_key); lexical_score = max(_agent_lexical_target_score(graph, agent, query, require_distinctive=require_distinctive,) for query in queries); name_lexical_score = _agent_name_target_score(graph, agent, queries, require_distinctive=True,); vector_score = 0.0
         if query_vecs:
             try:
                 agent_vec = np.asarray(str_to_vector(name), dtype=np.float32); vector_score = max(float(np.dot(agent_vec, query_vec)) for query_vec in query_vecs)
@@ -166,11 +166,11 @@ def _rank_agents_by_name_similarity(brain, queries, require_distinctive=False):
     return ranked
 
 # Ranks anchor candidates for thought routing.
-def _rank_anchor_candidates(brain, side, limit):
-    queries = completion_queries_for_side(brain, side)
+def _rank_anchor_candidates(graph, side, limit):
+    queries = completion_queries_for_side(graph, side)
     if not queries:
         return []
-    opposite_side = "b" if str(side or "").strip().lower() == "a" else "a"; opposite_target = target_text_for_side(brain, opposite_side); ranked = _rank_agents_by_name_similarity(brain, queries, require_distinctive=True); candidates = []
+    opposite_side = "b" if str(side or "").strip().lower() == "a" else "a"; opposite_target = target_text_for_side(graph, opposite_side); ranked = _rank_agents_by_name_similarity(graph, queries, require_distinctive=True); candidates = []
     for score, lexical_score, vector_score, name_score, degree, name, anchor_quality, agent in ranked:
         if getattr(agent, "index", None) is None:
             continue
@@ -180,19 +180,19 @@ def _rank_anchor_candidates(brain, side, limit):
         if grounding_score < float(PATH_TARGET_MATCH_THRESHOLD):
             continue
         if opposite_target:
-            opposite_name_score = lexical_target_score(brain, name, opposite_target, require_distinctive=False,)
+            opposite_name_score = lexical_target_score(graph, name, opposite_target, require_distinctive=False,)
             if opposite_name_score >= 0.9 and float(name_score) < 0.5:
                 continue
-        best_query = max(queries, key=lambda query: _agent_lexical_target_score(brain, agent, query),)
+        best_query = max(queries, key=lambda query: _agent_lexical_target_score(graph, agent, query),)
         candidates.append({"agent": agent, "query": best_query, "score": float(score), "lexical_score": float(lexical_score), "vector_score": float(vector_score), "name_score": float(name_score), "grounding_score": float(grounding_score), "degree": int(degree), "name": name, "anchor_quality": float(anchor_quality),})
         if len(candidates) >= int(limit):
             break
     return candidates
 
-# Builds directed adjacency from Brain connection keys.
-def _directed_adjacency_from_connections(brain):
+# Builds directed adjacency from ContextGraph connection keys.
+def _directed_adjacency_from_connections(graph):
     adjacency = {}
-    for key in getattr(brain, "connection_offsets", {}) or {}:
+    for key in getattr(graph, "connection_offsets", {}) or {}:
         try:
             source = int(key[0]); target = int(key[1])
         except (TypeError, ValueError, IndexError):
@@ -229,13 +229,13 @@ def _reachable_indices(adjacency, starts):
             seen.add(neighbor); queue.append(neighbor)
     return seen
 
-# Counts concrete specifics attached to one Brain connection key.
-def _connection_specific_count(brain, key):
-    specifics = getattr(brain, "connection_specifics", {}).get(key, {}) or {}
+# Counts concrete specifics attached to one ContextGraph connection key.
+def _connection_specific_count(graph, key):
+    specifics = getattr(graph, "connection_specifics", {}).get(key, {}) or {}
     return sum(len(list(specifics.get(field, []) or [])) for field in ("subject_specifics", "predicate_specifics", "connection_specifics"))
 
 # Scores route support by edge count, source diversity, and concrete specifics.
-def _route_metrics(brain, start_agent, goal_agent, adjacency, reverse_adjacency, forward_reach=None, backward_reach=None,):
+def _route_metrics(graph, start_agent, goal_agent, adjacency, reverse_adjacency, forward_reach=None, backward_reach=None,):
     empty = {"edge_count": 0, "node_count": 0, "source_count": 0, "specific_count": 0, "specific_edge_count": 0, "score": 0.0,}; start_index = getattr(start_agent, "index", None); goal_index = getattr(goal_agent, "index", None)
     if start_index is None or goal_index is None:
         return empty
@@ -254,10 +254,10 @@ def _route_metrics(brain, start_agent, goal_agent, adjacency, reverse_adjacency,
         for target, key in edges:
             if int(target) not in to_goal:
                 continue
-            route_edges.add(key); route_nodes.add(int(source)); route_nodes.add(int(target)); display = display_source(getattr(brain, "connection_sources", {}).get(key, ""))
+            route_edges.add(key); route_nodes.add(int(source)); route_nodes.add(int(target)); display = display_source(getattr(graph, "connection_sources", {}).get(key, ""))
             if display and display != "unknown":
                 sources.add(display.rstrip("/").lower())
-            edge_specific_count = _connection_specific_count(brain, key); specific_count += edge_specific_count
+            edge_specific_count = _connection_specific_count(graph, key); specific_count += edge_specific_count
             if edge_specific_count:
                 specific_edge_count += 1
     edge_count = len(route_edges); source_count = len(sources); score = (min(edge_count, 96) + (2.5 * min(source_count, 16)) + (1.25 * min(specific_edge_count, 48)) + (0.2 * min(specific_count, 160)))
@@ -269,8 +269,8 @@ def _pair_diagnostic(pair, selected=False):
     return {"selected": bool(selected), "a": pair["a"].get("name", ""), "b": pair["b"].get("name", ""), "a_score": round(float(pair["a"].get("score", 0.0) or 0.0), 3), "b_score": round(float(pair["b"].get("score", 0.0) or 0.0), 3), "a_grounding": round(float(pair["a"].get("grounding_score", 0.0) or 0.0), 3), "b_grounding": round(float(pair["b"].get("grounding_score", 0.0) or 0.0), 3), "a_to_b_edges": int(a_metrics.get("edge_count", 0) or 0), "b_to_a_edges": int(b_metrics.get("edge_count", 0) or 0), "sources": int(a_metrics.get("source_count", 0) or 0) + int(b_metrics.get("source_count", 0) or 0), "specific_edges": int(a_metrics.get("specific_edge_count", 0) or 0) + int(b_metrics.get("specific_edge_count", 0) or 0), "rank": tuple(round(float(value), 3) for value in pair.get("rank", ())),}
 
 # Finds target-anchor pairs that have usable directed routes in both directions.
-def _connected_anchor_pairs(brain, candidate_limit, pair_limit=None):
-    a_candidates = _rank_anchor_candidates(brain, "a", candidate_limit); b_candidates = _rank_anchor_candidates(brain, "b", candidate_limit); adjacency = _directed_adjacency_from_connections(brain); reverse = _reverse_adjacency(adjacency)
+def _connected_anchor_pairs(graph, candidate_limit, pair_limit=None):
+    a_candidates = _rank_anchor_candidates(graph, "a", candidate_limit); b_candidates = _rank_anchor_candidates(graph, "b", candidate_limit); adjacency = _directed_adjacency_from_connections(graph); reverse = _reverse_adjacency(adjacency)
     candidate_indices = {int(item["agent"].index) for item in list(a_candidates or []) + list(b_candidates or []) if getattr(item.get("agent"), "index", None) is not None}; forward_reach = {index: _reachable_indices(adjacency, [index]) for index in candidate_indices}
     backward_reach = {index: _reachable_indices(reverse, [index]) for index in candidate_indices}; pairs = []
     for a_item in a_candidates:
@@ -279,7 +279,7 @@ def _connected_anchor_pairs(brain, candidate_limit, pair_limit=None):
             b_agent = b_item["agent"]
             if int(a_agent.index) == int(b_agent.index):
                 continue
-            a_to_b_metrics = _route_metrics(brain, a_agent, b_agent, adjacency, reverse, forward_reach=forward_reach, backward_reach=backward_reach,); b_to_a_metrics = _route_metrics(brain, b_agent, a_agent, adjacency, reverse, forward_reach=forward_reach, backward_reach=backward_reach,); a_to_b = a_to_b_metrics["edge_count"] > 0
+            a_to_b_metrics = _route_metrics(graph, a_agent, b_agent, adjacency, reverse, forward_reach=forward_reach, backward_reach=backward_reach,); b_to_a_metrics = _route_metrics(graph, b_agent, a_agent, adjacency, reverse, forward_reach=forward_reach, backward_reach=backward_reach,); a_to_b = a_to_b_metrics["edge_count"] > 0
             b_to_a = b_to_a_metrics["edge_count"] > 0
             if not a_to_b and not b_to_a:
                 continue
@@ -294,15 +294,15 @@ def _connected_anchor_pairs(brain, candidate_limit, pair_limit=None):
                 if (getattr(a_agent, "index", None) is None or getattr(b_agent, "index", None) is None or int(a_agent.index) == int(b_agent.index)):
                     continue
                 diagnostics.append({"a": a_item, "b": b_item, "a_to_b_metrics": {}, "b_to_a_metrics": {}, "rank": (min(float(a_item.get("score", 0.0)), float(b_item.get("score", 0.0))), float(a_item.get("score", 0.0)) + float(b_item.get("score", 0.0)), float(a_item.get("grounding_score", 0.0)) + float(b_item.get("grounding_score", 0.0)),),})
-        diagnostics.sort(key=lambda item: item["rank"], reverse=True); brain.anchor_pair_diagnostics = [_pair_diagnostic(pair, selected=False) for pair in diagnostics[:8]]
+        diagnostics.sort(key=lambda item: item["rank"], reverse=True); graph.anchor_pair_diagnostics = [_pair_diagnostic(pair, selected=False) for pair in diagnostics[:8]]
         return []
     pairs.sort(key=lambda item: item["rank"], reverse=True); pair_limit = max(1, int(pair_limit or ACTIVE_ANCHOR_PAIR_LIMIT)); selected = pairs[:pair_limit]; selected_keys = {(int(pair["a"]["agent"].index), int(pair["b"]["agent"].index)) for pair in selected}; diagnostic_pairs = selected + [pair for pair in pairs[pair_limit:pair_limit + 8]]
-    seen_diag = set(); brain.anchor_pair_diagnostics = []
+    seen_diag = set(); graph.anchor_pair_diagnostics = []
     for pair in diagnostic_pairs:
         key = (int(pair["a"]["agent"].index), int(pair["b"]["agent"].index))
         if key in seen_diag:
             continue
-        seen_diag.add(key); brain.anchor_pair_diagnostics.append(_pair_diagnostic(pair, selected=key in selected_keys))
+        seen_diag.add(key); graph.anchor_pair_diagnostics.append(_pair_diagnostic(pair, selected=key in selected_keys))
     return selected
 
 # Deduplicates anchor seed specs by agent index.
@@ -359,17 +359,17 @@ def _with_redistributed_route_spawns(routes, total_thoughts):
     return redistributed
 
 # Chooses paired A-to-B and B-to-A anchor routes for native thought spawning.
-def select_thought_routes(brain, seed_limit=None, goal_limit=None, total_thoughts=None):
-    candidate_limit = max(1, int(seed_limit or TARGET_SEED_LIMIT), int(goal_limit or GOAL_AGENT_LIMIT),); pairs = _connected_anchor_pairs(brain, candidate_limit, pair_limit=ACTIVE_ANCHOR_PAIR_LIMIT,); routes = []
+def select_thought_routes(graph, seed_limit=None, goal_limit=None, total_thoughts=None):
+    candidate_limit = max(1, int(seed_limit or TARGET_SEED_LIMIT), int(goal_limit or GOAL_AGENT_LIMIT),); pairs = _connected_anchor_pairs(graph, candidate_limit, pair_limit=ACTIVE_ANCHOR_PAIR_LIMIT,); routes = []
     for route_index, direction in enumerate(route_directions()):
-        start_side = direction["start_side"]; goal_side = direction["goal_side"]; seed_queries = completion_queries_for_side(brain, start_side); goal_queries = completion_queries_for_side(brain, goal_side); seed_specs = []; goal_agents = []
+        start_side = direction["start_side"]; goal_side = direction["goal_side"]; seed_queries = completion_queries_for_side(graph, start_side); goal_queries = completion_queries_for_side(graph, goal_side); seed_specs = []; goal_agents = []
         for pair in pairs:
             if direction["id"] == "a_to_b" and pair["a_to_b"]:
                 seed_specs.append(_route_seed_spec(pair["a"], 1)); goal_agents.append(pair["b"]["agent"])
             elif direction["id"] == "b_to_a" and pair["b_to_a"]:
                 seed_specs.append(_route_seed_spec(pair["b"], 1)); goal_agents.append(pair["a"]["agent"])
         seed_specs = [_route_seed_spec(item, 1) for item in _unique_anchor_items(seed_specs)]; goal_agents = _unique_goal_agents(goal_agents)
-        routes.append({**direction, "index": route_index, "start_target": target_text_for_side(brain, start_side), "goal_target": target_text_for_side(brain, goal_side), "seed_queries": seed_queries, "goal_queries": goal_queries, "seed_specs": seed_specs, "seed_agents": [item["agent"] for item in seed_specs], "goal_agents": list(goal_agents), "anchor_locked": True,})
+        routes.append({**direction, "index": route_index, "start_target": target_text_for_side(graph, start_side), "goal_target": target_text_for_side(graph, goal_side), "seed_queries": seed_queries, "goal_queries": goal_queries, "seed_specs": seed_specs, "seed_agents": [item["agent"] for item in seed_specs], "goal_agents": list(goal_agents), "anchor_locked": True,})
     return _with_redistributed_route_spawns(routes, total_thoughts)
 
 # Deduplicates agents by index while preserving order.
@@ -382,37 +382,37 @@ def _unique_agents(agents):
         seen.add(int(index)); unique.append(agent)
     return unique
 
-# Stores selected route metadata on Brain and assigns seed/goal agents for thought workers.
-def apply_thought_routes(brain, routes):
-    brain.target_thought_routes = [dict(route) for route in list(routes or [])]; seed_specs = []; goal_agents = []
-    for route in brain.target_thought_routes:
+# Stores selected route metadata on ContextGraph and assigns seed/goal agents for thought workers.
+def apply_thought_routes(graph, routes):
+    graph.target_thought_routes = [dict(route) for route in list(routes or [])]; seed_specs = []; goal_agents = []
+    for route in graph.target_thought_routes:
         route["seed_specs"] = list(route.get("seed_specs", []) or []); route["seed_agents"] = [item["agent"] for item in route["seed_specs"] if item.get("agent") is not None]; route["goal_agents"] = list(route.get("goal_agents", []) or []); seed_specs.extend(route["seed_specs"]); goal_agents.extend(route["goal_agents"])
-    brain.target_seed_specs = seed_specs; brain.target_seed_agents = _unique_agents(item["agent"] for item in seed_specs if item.get("agent") is not None); brain.target_goal_agents = _unique_agents(goal_agents); brain.thoughts = []
+    graph.target_seed_specs = seed_specs; graph.target_seed_agents = _unique_agents(item["agent"] for item in seed_specs if item.get("agent") is not None); graph.target_goal_agents = _unique_agents(goal_agents); graph.thoughts = []
 
-# Refreshes route anchors and stores seed/goal agents on Brain.
-def refresh_target_seed_agents(brain, limit=None, total_thoughts=None):
-    clear_thought_caches(); existing_routes = list(getattr(brain, "target_thought_routes", []) or [])
+# Refreshes route anchors and stores seed/goal agents on ContextGraph.
+def refresh_target_seed_agents(graph, limit=None, total_thoughts=None):
+    clear_thought_caches(); existing_routes = list(getattr(graph, "target_thought_routes", []) or [])
     if existing_routes and all(route.get("anchor_locked") for route in existing_routes):
         routes = _with_redistributed_route_spawns(existing_routes, total_thoughts)
     else:
-        routes = select_thought_routes(brain, seed_limit=limit, goal_limit=GOAL_AGENT_LIMIT, total_thoughts=total_thoughts,)
-    apply_thought_routes(brain, routes)
-    if brain.target_seed_agents:
-        thought_count = sum(int(item.get("spawn_count", 1)) for route in brain.target_thought_routes for item in route.get("seed_specs", [])); print(f"[THOUGHT] Seeded {thought_count} thought agents across " f"{len(brain.target_seed_agents)} target-matched information agents for '{brain.current_target}'.")
-        if brain.current_subqueries:
-            print(f"[THOUGHT] Seed queries: {', '.join(brain.current_subqueries[:10])}")
-        if brain.target_a_focus_phrases:
-            print(f"[THOUGHT] Target A focus (query expansion only): {', '.join(brain.target_a_focus_phrases)}")
-        if brain.target_b_focus_phrases:
-            print(f"[THOUGHT] Target B focus (query expansion only): {', '.join(brain.target_b_focus_phrases)}")
-        for route in brain.target_thought_routes:
+        routes = select_thought_routes(graph, seed_limit=limit, goal_limit=GOAL_AGENT_LIMIT, total_thoughts=total_thoughts,)
+    apply_thought_routes(graph, routes)
+    if graph.target_seed_agents:
+        thought_count = sum(int(item.get("spawn_count", 1)) for route in graph.target_thought_routes for item in route.get("seed_specs", [])); print(f"[THOUGHT] Seeded {thought_count} thought agents across " f"{len(graph.target_seed_agents)} target-matched information agents for '{graph.current_target}'.")
+        if graph.current_subqueries:
+            print(f"[THOUGHT] Seed queries: {', '.join(graph.current_subqueries[:10])}")
+        if graph.target_a_focus_phrases:
+            print(f"[THOUGHT] Target A focus (query expansion only): {', '.join(graph.target_a_focus_phrases)}")
+        if graph.target_b_focus_phrases:
+            print(f"[THOUGHT] Target B focus (query expansion only): {', '.join(graph.target_b_focus_phrases)}")
+        for route in graph.target_thought_routes:
             seeds = route.get("seed_agents", []); goals = route.get("goal_agents", []); seed_preview = ", ".join(agent.ASU for agent in seeds[:5]) or "(none)"; goal_preview = ", ".join(agent.ASU for agent in goals[:5]) or "(none)"; print(f"[THOUGHT] Route {route.get('start_label')}->{route.get('goal_label')} " f"seeds: {seed_preview}")
             print(f"[THOUGHT] Route {route.get('start_label')}->{route.get('goal_label')} " f"goals: {goal_preview}")
-    else: print(f"[THOUGHT] No target-matched thought agents found for '{brain.current_target}'.")
+    else: print(f"[THOUGHT] No target-matched thought agents found for '{graph.current_target}'.")
 
 # Returns histories for thoughts that have finished walking.
-def completed_thought_histories(brain):
-    completed_thoughts = [thought for thought in brain.thoughts if len(getattr(thought, "history", [])) > 1]
+def completed_thought_histories(graph):
+    completed_thoughts = [thought for thought in graph.thoughts if len(getattr(thought, "history", [])) > 1]
     return completed_thoughts, [thought.history for thought in completed_thoughts]
 
 # Returns whether a thought payload has enough steps and target match.
@@ -422,11 +422,11 @@ def _payload_passes_success_threshold(payload):
     return not (float(payload.get("match_target_a", 0.0) or 0.0) < SYNTHESIS_TARGET_MATCH_THRESHOLD or float(payload.get("match_target_b", 0.0) or 0.0) < SYNTHESIS_TARGET_MATCH_THRESHOLD or float(payload.get("lexical_target_a", 0.0) or 0.0) < PATH_TARGET_MATCH_THRESHOLD)
 
 # Returns completed thoughts that satisfy endpoint and target-match thresholds.
-def successful_thoughts(brain):
-    strict_successes = [thought for thought in brain.thoughts if getattr(thought, "successful", False) and getattr(thought, "termination_reason", "") == "endpoint" and getattr(thought, "success_payload", None) and _payload_passes_success_threshold(getattr(thought, "success_payload", None))]
+def successful_thoughts(graph):
+    strict_successes = [thought for thought in graph.thoughts if getattr(thought, "successful", False) and getattr(thought, "termination_reason", "") == "endpoint" and getattr(thought, "success_payload", None) and _payload_passes_success_threshold(getattr(thought, "success_payload", None))]
     if strict_successes: return strict_successes
     candidates = []
-    for thought in brain.thoughts:
+    for thought in graph.thoughts:
         if getattr(thought, "termination_reason", "") != "endpoint": continue
         if len(getattr(thought, "history", [])) - 1 < MIN_SUCCESS_STEPS: continue
         try:
@@ -439,18 +439,18 @@ def successful_thoughts(brain):
     return candidates
 
 # Summarizes current thought progress for the dashboard and final report.
-def thought_swarm_stats(brain):
-    process = getattr(brain, "thought_process", None); process_alive = bool(process is not None and process.poll() is None); expected = int(getattr(brain, "thought_expected_count", 0) or 0); total = len(brain.thoughts) or expected
-    alive = expected if process_alive and not brain.thoughts else sum(1 for thought in brain.thoughts if getattr(thought, "alive", False)); completed = sum(1 for thought in brain.thoughts if len(getattr(thought, "history", [])) > 1); successful = sum(1 for thought in brain.thoughts if getattr(thought, "successful", False))
-    endpoint = sum(1 for thought in brain.thoughts if not getattr(thought, "alive", False) and getattr(thought, "termination_reason", "") == "endpoint"); dead = sum(1 for thought in brain.thoughts if not getattr(thought, "alive", False) and getattr(thought, "termination_reason", "") == "dead")
-    max_hops = sum(1 for thought in brain.thoughts if not getattr(thought, "alive", False) and getattr(thought, "termination_reason", "") == "max_hops")
-    with brain._thought_lock:
-        active_workers = 1 if process_alive else int(brain.thought_active_count)
-    return {"total": total, "alive": alive, "completed": completed, "successful": successful, "endpoint": endpoint, "dead": dead, "max_hops": max_hops, "active_workers": active_workers, "seeds": len(brain.target_seed_agents),}
+def thought_swarm_stats(graph):
+    process = getattr(graph, "thought_process", None); process_alive = bool(process is not None and process.poll() is None); expected = int(getattr(graph, "thought_expected_count", 0) or 0); total = len(graph.thoughts) or expected
+    alive = expected if process_alive and not graph.thoughts else sum(1 for thought in graph.thoughts if getattr(thought, "alive", False)); completed = sum(1 for thought in graph.thoughts if len(getattr(thought, "history", [])) > 1); successful = sum(1 for thought in graph.thoughts if getattr(thought, "successful", False))
+    endpoint = sum(1 for thought in graph.thoughts if not getattr(thought, "alive", False) and getattr(thought, "termination_reason", "") == "endpoint"); dead = sum(1 for thought in graph.thoughts if not getattr(thought, "alive", False) and getattr(thought, "termination_reason", "") == "dead")
+    max_hops = sum(1 for thought in graph.thoughts if not getattr(thought, "alive", False) and getattr(thought, "termination_reason", "") == "max_hops")
+    with graph._thought_lock:
+        active_workers = 1 if process_alive else int(graph.thought_active_count)
+    return {"total": total, "alive": alive, "completed": completed, "successful": successful, "endpoint": endpoint, "dead": dead, "max_hops": max_hops, "active_workers": active_workers, "seeds": len(graph.target_seed_agents),}
 
 # Returns the configured native thought-engine binary path.
 def _thought_binary_path():
-    return os.environ.get("BRAIN_THOUGHT_ENGINE") or str(Path(__file__).resolve().parents[3] / "venv" / "thought-engine")
+    return os.environ.get("CONTEXTGRAPH_THOUGHT_ENGINE") or str(Path(__file__).resolve().parents[3] / "venv" / "thought-engine")
 
 # Returns graph neighbor indices for an agent from attached connectors.
 def _neighbor_indices_for_agent(agent):
@@ -461,7 +461,7 @@ def _neighbor_indices_for_agent(agent):
             yield int(target_index)
 
 # Returns assigned goal agents reachable from a seed agent.
-def _reachable_goal_agents(brain, start_agent, goal_agents):
+def _reachable_goal_agents(graph, start_agent, goal_agents):
     start_index = getattr(start_agent, "index", None)
     if start_index is None: return []
     goal_by_index = {int(goal.index): goal for goal in list(goal_agents or []) if getattr(goal, "index", None) is not None}
@@ -473,7 +473,7 @@ def _reachable_goal_agents(brain, start_agent, goal_agents):
             found.append(goal_by_index[current_index])
             if len(found) == len(goal_by_index):
                 break
-        agent = brain.agents_by_idx.get(current_index)
+        agent = graph.agents_by_idx.get(current_index)
         if agent is None:
             continue
         for neighbor_index in _neighbor_indices_for_agent(agent):
@@ -484,10 +484,10 @@ def _reachable_goal_agents(brain, start_agent, goal_agents):
     return [goal for goal in goal_agents if int(goal.index) in found_indices]
 
 # Builds native thought-engine seed lines from selected route specs.
-def _assigned_cpp_seed_lines(brain):
-    lines = []; routes = list(getattr(brain, "target_thought_routes", []) or [])
+def _assigned_cpp_seed_lines(graph):
+    lines = []; routes = list(getattr(graph, "target_thought_routes", []) or [])
     if not routes:
-        routes = [{"index": 0, "seed_specs": list(getattr(brain, "target_seed_specs", []) or []), "goal_agents": list(getattr(brain, "target_goal_agents", []) or []),}]
+        routes = [{"index": 0, "seed_specs": list(getattr(graph, "target_seed_specs", []) or []), "goal_agents": list(getattr(graph, "target_goal_agents", []) or []),}]
     for route in routes:
         goal_agents = list(route.get("goal_agents", []) or [])[:GOAL_AGENT_LIMIT]
         if not goal_agents:
@@ -497,7 +497,7 @@ def _assigned_cpp_seed_lines(brain):
             agent = item.get("agent")
             if agent is None:
                 continue
-            reachable_goals = _reachable_goal_agents(brain, agent, goal_agents)
+            reachable_goals = _reachable_goal_agents(graph, agent, goal_agents)
             if not reachable_goals:
                 continue
             spawn_count = max(1, int(item.get("spawn_count", 1)))
@@ -506,21 +506,21 @@ def _assigned_cpp_seed_lines(brain):
     return lines
 
 # Writes cpp thought input to storage or shared memory.
-def _write_cpp_thought_input(brain, path):
-    lines = [f"max_hops {int(MAX_THOUGHT_HOPS)}",]; lines.extend(_assigned_cpp_seed_lines(brain))
+def _write_cpp_thought_input(graph, path):
+    lines = [f"max_hops {int(MAX_THOUGHT_HOPS)}",]; lines.extend(_assigned_cpp_seed_lines(graph))
     with open(path, "w") as f:
         f.write("\n".join(lines) + "\n")
 
 # Returns the total native thought spawn count assigned across routes.
-def _assigned_cpp_thought_count(brain):
-    return len(_assigned_cpp_seed_lines(brain))
+def _assigned_cpp_thought_count(graph):
+    return len(_assigned_cpp_seed_lines(graph))
 
-# Maps shared-memory connection offsets back to Brain connection keys.
-def _offset_key_map(brain):
-    return {int(offset): key for key, offset in brain.connection_offsets.items()}
+# Maps shared-memory connection offsets back to ContextGraph connection keys.
+def _offset_key_map(graph):
+    return {int(offset): key for key, offset in graph.connection_offsets.items()}
 
 # Rebuilds a Connector wrapper for one native thought result record index.
-def _connector_for_record_index(brain, connection_index, offset_keys):
+def _connector_for_record_index(graph, connection_index, offset_keys):
     try:
         connection_index = int(connection_index)
     except (TypeError, ValueError):
@@ -529,12 +529,12 @@ def _connector_for_record_index(brain, connection_index, offset_keys):
         return None
     offset = 4 + (connection_index * CONNECTION_RECORD_SIZE)
     try:
-        (s_idx, relation_id, o_idx, _utility, subject_quant, subject_tense, subject_truth, predicate_quant, predicate_tense, predicate_truth,) = struct.unpack_from("<iiifiiiiii", brain.shm_connections.buf, offset)
+        (s_idx, relation_id, o_idx, _utility, subject_quant, subject_tense, subject_truth, predicate_quant, predicate_tense, predicate_truth,) = struct.unpack_from("<iiifiiiiii", graph.shm_connections.buf, offset)
     except struct.error:
         return None
     subject_sp = ConnectionEndpoint(subject_quant, subject_tense, subject_truth, s_idx); predicate_sp = ConnectionEndpoint(predicate_quant, predicate_tense, predicate_truth, o_idx); key = offset_keys.get(offset) or p_connection_graph._exact_connection_signature(s_idx, o_idx, relation_id, subject_sp, predicate_sp,)
-    state = brain.connection_states.get(key, {}); specifics = brain.connection_specifics.get(key, {}); previous_agent_ids = brain.connection_previous_agents.get(key, ())
-    return Connector(brain.shm_connections.buf, offset, brain.agents_by_idx, subject_sp=state.get("subject_sp") if isinstance(state.get("subject_sp"), ConnectionEndpoint) else subject_sp, predicate_sp=state.get("predicate_sp") if isinstance(state.get("predicate_sp"), ConnectionEndpoint) else predicate_sp, source=brain.connection_sources.get(key, "unknown"), evidence_text=brain.connection_texts.get(key, ""), subject_specifics=specifics.get("subject_specifics"), predicate_specifics=specifics.get("predicate_specifics"), connection_specifics=specifics.get("connection_specifics"), previous_agent_ids=previous_agent_ids,)
+    state = graph.connection_states.get(key, {}); specifics = graph.connection_specifics.get(key, {}); previous_agent_ids = graph.connection_previous_agents.get(key, ())
+    return Connector(graph.shm_connections.buf, offset, graph.agents_by_idx, subject_sp=state.get("subject_sp") if isinstance(state.get("subject_sp"), ConnectionEndpoint) else subject_sp, predicate_sp=state.get("predicate_sp") if isinstance(state.get("predicate_sp"), ConnectionEndpoint) else predicate_sp, source=graph.connection_sources.get(key, "unknown"), evidence_text=graph.connection_texts.get(key, ""), subject_specifics=specifics.get("subject_specifics"), predicate_specifics=specifics.get("predicate_specifics"), connection_specifics=specifics.get("connection_specifics"), previous_agent_ids=previous_agent_ids,)
 
 # Returns display text for an endpoint index in a native thought step.
 def _endpoint_text(agent, endpoint):
@@ -549,8 +549,8 @@ def _remember_specific_context(thought, details):
         suffix = f" [{display_source(source)}]" if thought._source_is_citable(source) else ""; thought._remember_note(f"{detail.get('text', '')}{suffix}")
 
 # Converts one native route step into Thought history and evidence state.
-def _append_cpp_step(thought, brain, step, offset_keys):
-    conn = _connector_for_record_index(brain, step["connection_index"], offset_keys); from_agent = brain.agents_by_idx.get(step["from"]); to_agent = brain.agents_by_idx.get(step["to"])
+def _append_cpp_step(thought, graph, step, offset_keys):
+    conn = _connector_for_record_index(graph, step["connection_index"], offset_keys); from_agent = graph.agents_by_idx.get(step["from"]); to_agent = graph.agents_by_idx.get(step["to"])
     if conn is None or from_agent is None or to_agent is None:
         return False
     thought.current_asu = from_agent; specific_details = thought._specific_context_details(conn, limit=MAX_CONTEXT_SAMPLES); _remember_specific_context(thought, specific_details)
@@ -564,9 +564,9 @@ def _append_cpp_step(thought, brain, step, offset_keys):
     return True
 
 # Reads native thought paths and converts them back into Python Thought histories.
-def _load_cpp_thought_results(brain):
-    if getattr(brain, "thought_results_loaded", False): return
-    brain.thought_results_loaded = True; output_path = getattr(brain, "thought_output_path", "")
+def _load_cpp_thought_results(graph):
+    if getattr(graph, "thought_results_loaded", False): return
+    graph.thought_results_loaded = True; output_path = getattr(graph, "thought_output_path", "")
     if not output_path or not os.path.exists(output_path): print("[THOUGHT] C++ thought engine produced no output."); return
     records = []; current = None
     with open(output_path, "r") as f:
@@ -580,25 +580,25 @@ def _load_cpp_thought_results(brain):
                 current["steps"].append({"connection_index": int(parts[1]), "from": int(parts[2]), "to": int(parts[3]), "reversed": int(parts[4]),})
             elif parts[0] == "end" and current is not None:
                 records.append(current); current = None
-    routes = list(getattr(brain, "target_thought_routes", []) or []); route_by_index = {int(route.get("index", 0) or 0): route for route in routes}
+    routes = list(getattr(graph, "target_thought_routes", []) or []); route_by_index = {int(route.get("index", 0) or 0): route for route in routes}
     if not route_by_index:
-        completion_queries = completion_queries_for_side(brain, "b"); route_by_index = {0: {"start_target": brain.current_target_a, "goal_target": brain.current_target_b, "goal_queries": completion_queries, "goal_agents": getattr(brain, "target_goal_agents", []), "seed_specs": getattr(brain, "target_seed_specs", []),}}
+        completion_queries = completion_queries_for_side(graph, "b"); route_by_index = {0: {"start_target": graph.current_target_a, "goal_target": graph.current_target_b, "goal_queries": completion_queries, "goal_agents": getattr(graph, "target_goal_agents", []), "seed_specs": getattr(graph, "target_seed_specs", []),}}
     seed_queries = {}
     for route in route_by_index.values():
         for item in list(route.get("seed_specs", []) or []):
             agent = item.get("agent")
             if agent is not None:
                 seed_queries[(int(route.get("index", 0) or 0), int(agent.index))] = str(item.get("query", ""))
-    offset_keys = _offset_key_map(brain); thoughts = []
+    offset_keys = _offset_key_map(graph); thoughts = []
     for record in records:
-        start_agent = brain.agents_by_idx.get(record["start"])
+        start_agent = graph.agents_by_idx.get(record["start"])
         if start_agent is None:
             continue
         route = route_by_index.get(int(record.get("route", 0) or 0), route_by_index.get(0, {}))
         thought = Thought(start_agent, seed_query=seed_queries.get((int(record.get("route", 0) or 0), record["start"]), ""), start_target=route.get("start_target", ""), target_b=route.get("goal_target", ""), success_queries=route.get("goal_queries", []), goal_agents=route.get("goal_agents", []),); thought.route_id = route.get("id", "")
         thought.route_start_label = route.get("start_label", ""); thought.route_goal_label = route.get("goal_label", "")
         for step in record["steps"]:
-            _append_cpp_step(thought, brain, step, offset_keys)
+            _append_cpp_step(thought, graph, step, offset_keys)
         thought.alive = False; thought.termination_reason = record["reason"]; thought.successful = bool(record["success"] and len(thought.history) > 1)
         if thought.successful:
             try:
@@ -608,50 +608,50 @@ def _load_cpp_thought_results(brain):
             if isinstance(thought.success_payload, dict):
                 thought.success_payload["endpoint_reached"] = True; thought.success_payload["direction"] = route.get("id", ""); thought.success_payload["route"] = (f"{route.get('start_label', '')}->{route.get('goal_label', '')}")
         thoughts.append(thought)
-    brain.thoughts = thoughts; print(f"[THOUGHT] Loaded {len(thoughts)} C++ thought paths " f"{sum(1 for thought in thoughts if thought.successful)} reached assigned endpoints.")
+    graph.thoughts = thoughts; print(f"[THOUGHT] Loaded {len(thoughts)} C++ thought paths " f"{sum(1 for thought in thoughts if thought.successful)} reached assigned endpoints.")
 
 # Writes native thought input and launches the C++ thought engine process.
-def start_thought_workers(brain, stop_event, worker_count=None):
+def start_thought_workers(graph, stop_event, worker_count=None):
     if worker_count is None:
         worker_count = THINK_THREADS
-    if brain.thought_phase_started and brain.shm_status.buf[0] == PHASE_THINKING:
+    if graph.thought_phase_started and graph.shm_status.buf[0] == PHASE_THINKING:
         return
-    stop_thought_workers(brain); requested_worker_count = max(1, int(worker_count)); refresh_target_seed_agents(brain, total_thoughts=requested_worker_count * THOUGHT_AGENTS_PER_WORKER,); brain.thought_expected_count = _assigned_cpp_thought_count(brain)
-    with brain._thought_lock:
-        brain.thought_active_count = 1 if brain.thought_expected_count else 0
-    brain.thought_generation += 1; brain.thought_phase_started = True; brain.thought_results_loaded = False; brain.thought_process = None
-    if brain.thought_expected_count <= 0:
+    stop_thought_workers(graph); requested_worker_count = max(1, int(worker_count)); refresh_target_seed_agents(graph, total_thoughts=requested_worker_count * THOUGHT_AGENTS_PER_WORKER,); graph.thought_expected_count = _assigned_cpp_thought_count(graph)
+    with graph._thought_lock:
+        graph.thought_active_count = 1 if graph.thought_expected_count else 0
+    graph.thought_generation += 1; graph.thought_phase_started = True; graph.thought_results_loaded = False; graph.thought_process = None
+    if graph.thought_expected_count <= 0:
         print("[THOUGHT] No thought workers launched because no assigned start/end nodes were found.")
         return
     binary_path = _thought_binary_path()
     if not os.path.exists(binary_path):
-        print("[THOUGHT] C++ thought engine is not built. Run build.sh to compile venv/thought-engine."); brain.thought_results_loaded = True
-        with brain._thought_lock:
-            brain.thought_active_count = 0
+        print("[THOUGHT] C++ thought engine is not built. Run build.sh to compile venv/thought-engine."); graph.thought_results_loaded = True
+        with graph._thought_lock:
+            graph.thought_active_count = 0
         return
-    unique = f"{os.getpid()}_{brain.thought_generation}"; brain.thought_input_path = os.path.join(tempfile.gettempdir(), f"brain_thought_{unique}.in"); brain.thought_output_path = os.path.join(tempfile.gettempdir(), f"brain_thought_{unique}.out"); _write_cpp_thought_input(brain, brain.thought_input_path); env = os.environ.copy()
-    env["SHM_POS"] = brain.shm_pos.name; env["SHM_CONNECTIONS"] = brain.shm_connections.name; env["THOUGHT_INPUT"] = brain.thought_input_path; env["THOUGHT_OUTPUT"] = brain.thought_output_path; brain.thought_process = subprocess.Popen([binary_path], env=env)
-    print(f"[THOUGHT] Launched C++ thought engine for {brain.thought_expected_count} thought agents " f"({THOUGHT_AGENTS_PER_WORKER} argument variants per worker).")
+    unique = f"{os.getpid()}_{graph.thought_generation}"; graph.thought_input_path = os.path.join(tempfile.gettempdir(), f"graph_thought_{unique}.in"); graph.thought_output_path = os.path.join(tempfile.gettempdir(), f"graph_thought_{unique}.out"); _write_cpp_thought_input(graph, graph.thought_input_path); env = os.environ.copy()
+    env["SHM_POS"] = graph.shm_pos.name; env["SHM_CONNECTIONS"] = graph.shm_connections.name; env["THOUGHT_INPUT"] = graph.thought_input_path; env["THOUGHT_OUTPUT"] = graph.thought_output_path; graph.thought_process = subprocess.Popen([binary_path], env=env)
+    print(f"[THOUGHT] Launched C++ thought engine for {graph.thought_expected_count} thought agents " f"({THOUGHT_AGENTS_PER_WORKER} argument variants per worker).")
 
 # Returns whether the native thought process exited and loads results once.
-def thought_workers_finished(brain):
-    if not brain.thought_phase_started: return False
-    process = getattr(brain, "thought_process", None)
+def thought_workers_finished(graph):
+    if not graph.thought_phase_started: return False
+    process = getattr(graph, "thought_process", None)
     if process is not None and process.poll() is None: return False
     if process is not None and process.returncode not in (0, None): print(f"[THOUGHT] C++ thought engine exited with code {process.returncode}.")
-    _load_cpp_thought_results(brain)
-    with brain._thought_lock:
-        brain.thought_active_count = 0
+    _load_cpp_thought_results(graph)
+    with graph._thought_lock:
+        graph.thought_active_count = 0
     return True
 
 # Stops thought workers and clears runtime state.
-def stop_thought_workers(brain):
-    brain.thought_generation += 1; process = getattr(brain, "thought_process", None)
+def stop_thought_workers(graph):
+    graph.thought_generation += 1; process = getattr(graph, "thought_process", None)
     if process is not None and process.poll() is None:
         process.terminate()
         try: process.wait(timeout=0.5)
         except subprocess.TimeoutExpired: process.kill()
-    elif process is not None: _load_cpp_thought_results(brain)
-    brain.thought_process = None; brain.thought_phase_started = False
-    with brain._thought_lock:
-        brain.thought_active_count = 0
+    elif process is not None: _load_cpp_thought_results(graph)
+    graph.thought_process = None; graph.thought_phase_started = False
+    with graph._thought_lock:
+        graph.thought_active_count = 0
