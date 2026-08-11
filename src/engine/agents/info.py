@@ -1,5 +1,5 @@
 import numpy as np  # type: ignore
-from typing import List, Optional; from o_connection import Connector; from u_constants import AGENT_SEMANTIC_SEED_SCALE; from d_word_info_map import concept_vector_from_text, str_to_vector
+from typing import List, Optional; from engine.agents.connection import Connector; from engine.common.constants import AGENT_SEMANTIC_SEED_SCALE; from engine.extract.word_info_map import concept_vector_from_text, str_to_vector
 # Represents one semantic graph node with a stable id, vector, position, and connectors.
 class Info_Agent:
     _projection_matrices = {} # maps info vector into 3D space (normalized to 0-1)

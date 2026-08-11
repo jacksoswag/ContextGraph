@@ -1,10 +1,12 @@
 import multiprocessing as mp; import os, sys, time, threading, subprocess; from pathlib import Path
 from dotenv import load_dotenv # type: ignore
 PROJECT_ROOT = Path(__file__).resolve().parent
-if str(PROJECT_ROOT) not in sys.path: sys.path.insert(0, str(PROJECT_ROOT))
+SRC = PROJECT_ROOT / "src"
+for _p in (str(SRC), str(PROJECT_ROOT)):
+    if _p not in sys.path: sys.path.insert(0, _p)
 ENV_PATH = Path(os.environ.get("BRAIN_ENV_PATH") or PROJECT_ROOT / ".env"); load_dotenv(ENV_PATH)
-from u_constants import (AGENT_POSITION_RECORD_BYTES, COMMAND_SHM_BYTES,CONNECTION_COUNT_BYTES, CONNECTION_RECORD_SIZE,DASHBOARD_PORT, DASHBOARD_URL, EXTRACTION_THREADS, LOG_DIR, MAX_AGENTS,MAX_CONNECTIONS, PHASE_IDLE,PHASE_PHYSICS, PHASE_RESEARCH, PHASE_STABLE, PHASE_SYNTHESIS, PHASE_THINKING, REPORT_SHM_BYTES, SCRAPE_THREADS, STATUS_SHM_BYTES)
-from utils import remove_shm_from_resource_tracker, ensure_port_free, create_shm, write_report
+from engine.common.constants import (AGENT_POSITION_RECORD_BYTES, COMMAND_SHM_BYTES,CONNECTION_COUNT_BYTES, CONNECTION_RECORD_SIZE,DASHBOARD_PORT, DASHBOARD_URL, EXTRACTION_THREADS, LOG_DIR, MAX_AGENTS,MAX_CONNECTIONS, PHASE_IDLE,PHASE_PHYSICS, PHASE_RESEARCH, PHASE_STABLE, PHASE_SYNTHESIS, PHASE_THINKING, REPORT_SHM_BYTES, SCRAPE_THREADS, STATUS_SHM_BYTES)
+from engine.common.shm import remove_shm_from_resource_tracker, ensure_port_free, create_shm, write_report
 if __name__ == "__main__": remove_shm_from_resource_tracker()
 # Mirrors stdout/stderr into a startup-timestamped log while preserving terminal output.
 class StartupLogTee:
@@ -94,7 +96,7 @@ def main():
         server_proc        = launch_webapp(shm_names) # launch web UI
         status_shm.buf[0]  = PHASE_IDLE # updates phase
         zero_ticks         = 0  # consecutive ticks where sync_counter == 0 and queue empty
-        from d_scrape_worker import scrape_worker_loop; from d_extraction_worker import extraction_worker_loop; import m_runtime as runtime_api
+        from engine.extract.scrape_worker import scrape_worker_loop; from engine.extract.worker import extraction_worker_loop; import engine.runtime as runtime_api
         # ------------ THREAD SETUP ------------
         for i in range(SCRAPE_THREADS): # launch 8 scrape workers
             p = mp.Process(target=scrape_worker_loop, # calls scraper_worker.py for each thread

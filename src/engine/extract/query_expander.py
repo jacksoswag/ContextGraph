@@ -1,4 +1,4 @@
-import re; from u_constants import (BRIDGE_QUERY_LIMIT, TARGET_FOCUS_PHRASE_LIMIT, TARGET_QUERY_LIMIT); from u_language_constants import STOPWORD_TOKENS; TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)?")
+import re; from engine.common.constants import (BRIDGE_QUERY_LIMIT, TARGET_FOCUS_PHRASE_LIMIT, TARGET_QUERY_LIMIT); from engine.common.language import STOPWORD_TOKENS; TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)?")
 
 # Cleans text for query expansion.
 def _clean_text(text): return " ".join(str(text or "").strip().split())

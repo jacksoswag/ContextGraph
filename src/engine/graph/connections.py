@@ -1,7 +1,7 @@
 import struct
 import numpy as np  # type: ignore
-from u_constants import (CONNECTION_RECORD_SIZE, CONNECTION_UTILITY_OFFSET, MAX_CONNECTIONS, PREDICATE_QUANT_EXACT_OFFSET, PREDICATE_TENSE_EXACT_OFFSET, PREDICATE_TRUTH_EXACT_OFFSET, SUBJECT_QUANT_EXACT_OFFSET, SUBJECT_TENSE_EXACT_OFFSET, SUBJECT_TRUTH_EXACT_OFFSET,); from d_noise_cleanup import clean_agent_name, clean_clause_text, is_usable_agent_text
-from d_word_info_map import literal_from_index; from o_connection import Connector, ConnectionEndpoint; from utils import display_source, format_specifics, merge_specifics
+from engine.common.constants import (CONNECTION_RECORD_SIZE, CONNECTION_UTILITY_OFFSET, MAX_CONNECTIONS, PREDICATE_QUANT_EXACT_OFFSET, PREDICATE_TENSE_EXACT_OFFSET, PREDICATE_TRUTH_EXACT_OFFSET, SUBJECT_QUANT_EXACT_OFFSET, SUBJECT_TENSE_EXACT_OFFSET, SUBJECT_TRUTH_EXACT_OFFSET,); from engine.extract.noise_cleanup import clean_agent_name, clean_clause_text, is_usable_agent_text
+from engine.extract.word_info_map import literal_from_index; from engine.agents.connection import Connector, ConnectionEndpoint; from engine.common.shm import display_source, format_specifics, merge_specifics
 # Merges subject, predicate, and relation specifics into one metadata payload.
 def _merged_specifics_payload(existing=None, subject_specifics=None, predicate_specifics=None, connection_specifics=None,):
     payload = dict(existing or {}); payload["subject_specifics"] = merge_specifics(payload.get("subject_specifics"), subject_specifics,); payload["predicate_specifics"] = merge_specifics(payload.get("predicate_specifics"), predicate_specifics,); payload["connection_specifics"] = merge_specifics(payload.get("connection_specifics"), connection_specifics,)

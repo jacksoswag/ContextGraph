@@ -1,4 +1,4 @@
-import os; from pathlib import Path; PROJECT_ROOT = Path(__file__).resolve().parent; RUNTIME_ROOT = Path(os.environ.get("BRAIN_RUNTIME_ROOT") or PROJECT_ROOT).expanduser().resolve(); SQL_DIR = RUNTIME_ROOT / "sql"; LOG_DIR = RUNTIME_ROOT / "logs"
+import os; from pathlib import Path; PROJECT_ROOT = Path(__file__).resolve().parents[3]; RUNTIME_ROOT = Path(os.environ.get("BRAIN_RUNTIME_ROOT") or PROJECT_ROOT).expanduser().resolve(); SQL_DIR = RUNTIME_ROOT / "sql"; LOG_DIR = RUNTIME_ROOT / "logs"
 # Runtime phases.
 PHASE_IDLE      = 0  # waiting for user input
 PHASE_RESEARCH  = 1  # Scrapers active, Mind ingesting connections

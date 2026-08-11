@@ -1,0 +1,16 @@
+# Derived from the imports in src/, frontend/, and main.py.
+# Versions are left open because this tree was last run against whatever pip
+# resolved in May 2026, and no pin here would be a claim worth trusting.
+#
+# spaCy also needs its English model, which pip does not pull in:
+#   python -m spacy download en_core_web_sm
+
+fastapi
+numpy
+pydantic
+python-dotenv
+requests
+sentence-transformers
+spacy
+trafilatura
+uvicorn

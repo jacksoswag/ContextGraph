@@ -1,0 +1,17 @@
+# Local Python environment and the compiled native engines that land inside it.
+venv/
+__pycache__/
+*.py[cod]
+
+# Runtime output, all regenerable.
+logs/
+results/
+sql/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Credentials.
+.env
+
+.DS_Store

@@ -1,4 +1,4 @@
-import re; from u_language_constants import DERIVATIONAL_SUFFIXES, INFLECTIONAL_SUFFIXES, STOPWORD_TOKENS; TARGET_TOKEN_RE = re.compile(r"[a-z0-9]+"); SHORT_TARGET_TOKEN_LENGTH = 2; MIN_STEM_LENGTH = 4
+import re; from engine.common.language import DERIVATIONAL_SUFFIXES, INFLECTIONAL_SUFFIXES, STOPWORD_TOKENS; TARGET_TOKEN_RE = re.compile(r"[a-z0-9]+"); SHORT_TARGET_TOKEN_LENGTH = 2; MIN_STEM_LENGTH = 4
 
 # Returns whether a stem is long and word-like enough for target matching.
 def _valid_stem(stem): return len(stem) >= MIN_STEM_LENGTH and re.search(r"[aeiouy]", stem) and re.search(r"[bcdfghjklmnpqrstvwxyz]", stem)

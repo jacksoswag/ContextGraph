@@ -1,8 +1,8 @@
 import struct; import random; import threading
 import numpy as np # type:ignore
-from multiprocessing import shared_memory; from o_info_agent import Info_Agent; from o_connection import ConnectionEndpoint; from s_synthesis import KnowledgeSynthesizer; import p_connection_graph; import p_active_subgraph; import s_reporting as reporting; import p_thought_process as thought_process
-from u_constants import AGENT_POSITION_RECORD_BYTES, AGENT_NEAR_PARENT_WEIGHT, AGENT_SPAWN_JITTER, MAX_MERGE_SIMILARITY, MAX_AGENTS, MIN_MERGE_SIMILARITY; from d_noise_cleanup import clean_agent_name, expand_clean_connection_record, is_usable_agent_text; from d_word_info_map import precache_text_vectors, str_to_vector, vector_specificity
-from utils import flush_conn_log as util_flush_conn_log, clear_report as util_clear_report
+from multiprocessing import shared_memory; from engine.agents.info import Info_Agent; from engine.agents.connection import ConnectionEndpoint; from engine.synthesis.synthesis import KnowledgeSynthesizer; import engine.graph.connections as p_connection_graph; import engine.graph.active_subgraph as p_active_subgraph; import engine.synthesis.reporting as reporting; import engine.thought.process as thought_process
+from engine.common.constants import AGENT_POSITION_RECORD_BYTES, AGENT_NEAR_PARENT_WEIGHT, AGENT_SPAWN_JITTER, MAX_MERGE_SIMILARITY, MAX_AGENTS, MIN_MERGE_SIMILARITY; from engine.extract.noise_cleanup import clean_agent_name, expand_clean_connection_record, is_usable_agent_text; from engine.extract.word_info_map import precache_text_vectors, str_to_vector, vector_specificity
+from engine.common.shm import flush_conn_log as util_flush_conn_log, clear_report as util_clear_report
 # Owns graph state and wires extraction, physics, thought routing, and synthesis together.
 class DecentralizedIntelligence:
     # Binds shared memory and initializes all in-memory graph, research, and route state.

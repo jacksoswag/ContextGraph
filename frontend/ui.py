@@ -6,9 +6,10 @@ from fastapi.middleware.cors import CORSMiddleware # type: ignore
 from fastapi.staticfiles import StaticFiles # type: ignore
 from fastapi.responses import HTMLResponse # type: ignore
 UI_ROOT = Path(__file__).resolve().parent; PROJECT_ROOT = UI_ROOT.parent; FRONTEND_ROOT = UI_ROOT
-if str(PROJECT_ROOT) not in sys.path: sys.path.insert(0, str(PROJECT_ROOT))
-from u_constants import (AGENT_POSITION_RECORD_BYTES, CONNECTION_RECORD_SIZE, COMMAND_SHM_BYTES, DASHBOARD_HOST, DASHBOARD_PORT, MAX_AGENTS, MAX_UI_AGENTS, MAX_UI_BONDS, MAX_UI_CONNECTION_STATS, RESULTS_DIR, WEBSOCKET_REFRESH_SECONDS, PHASE_IDLE, PHASE_RESEARCH, PHASE_PHYSICS, PHASE_STABLE, PHASE_THINKING, PHASE_SYNTHESIS)
-from utils import remove_shm_from_resource_tracker
+for _p in (str(PROJECT_ROOT / "src"), str(PROJECT_ROOT)):
+    if _p not in sys.path: sys.path.insert(0, _p)
+from engine.common.constants import (AGENT_POSITION_RECORD_BYTES, CONNECTION_RECORD_SIZE, COMMAND_SHM_BYTES, DASHBOARD_HOST, DASHBOARD_PORT, MAX_AGENTS, MAX_UI_AGENTS, MAX_UI_BONDS, MAX_UI_CONNECTION_STATS, RESULTS_DIR, WEBSOCKET_REFRESH_SECONDS, PHASE_IDLE, PHASE_RESEARCH, PHASE_PHYSICS, PHASE_STABLE, PHASE_THINKING, PHASE_SYNTHESIS)
+from engine.common.shm import remove_shm_from_resource_tracker
 app = FastAPI() # setup
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]); FRONTEND_ASSET_VERSION = str(int(time.time())); NO_CACHE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache", "Expires": "0"}; remove_shm_from_resource_tracker()
 # Maps the first available dashboard shared-memory name; returns a SharedMemory handle or None.

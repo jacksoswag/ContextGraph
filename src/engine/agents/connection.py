@@ -1,4 +1,4 @@
-import struct; from d_word_info_map import concept_from_index, connector_utility, get_or_create_index, get_literal_index, literal_from_index, str_to_vector; from u_constants import CONNECTION_UTILITY_OFFSET, ENDPOINT_CONTEXT_LIMIT
+import struct; from engine.extract.word_info_map import concept_from_index, connector_utility, get_or_create_index, get_literal_index, literal_from_index, str_to_vector; from engine.common.constants import CONNECTION_UTILITY_OFFSET, ENDPOINT_CONTEXT_LIMIT
 # Stores endpoint concept, quantifier, tense, truth, and modifier ids for a connection side.
 class ConnectionEndpoint:
     __slots__ = ("quantifier", "tense", "truth", "modifier_idx", "subject_predicate_id"); _context_registry = {}

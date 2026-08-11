@@ -1,4 +1,4 @@
-import re; from collections import OrderedDict; from functools import lru_cache; from u_language_constants import (AUXILIARY_TOKENS, FUTURE_TENSE_CUES, PAST_TENSE_CUES, RELATION_WORD_DERIVATIONAL_SUFFIXES, RELATION_WORD_S_EXCLUSION_SUFFIXES, RELATION_WORD_STRONG_SUFFIXES, STOPWORD_TOKENS, SUBORDINATE_CLAUSE_TOKENS)
+import re; from collections import OrderedDict; from functools import lru_cache; from engine.common.language import (AUXILIARY_TOKENS, FUTURE_TENSE_CUES, PAST_TENSE_CUES, RELATION_WORD_DERIVATIONAL_SUFFIXES, RELATION_WORD_S_EXCLUSION_SUFFIXES, RELATION_WORD_STRONG_SUFFIXES, STOPWORD_TOKENS, SUBORDINATE_CLAUSE_TOKENS)
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)?"); DOC_CACHE_LIMIT = 8192; _DOC_CACHE = OrderedDict(); FUTURE_TENSE_RE = re.compile(r"\b(?:%s)\b" % "|".join(re.escape(value).replace(r"\ ", r"\s+") for value in FUTURE_TENSE_CUES), re.IGNORECASE)
 PAST_TENSE_RE = re.compile(r"\b(?:%s)\b" % "|".join(re.escape(value).replace(r"\ ", r"\s+") for value in PAST_TENSE_CUES), re.IGNORECASE)
 

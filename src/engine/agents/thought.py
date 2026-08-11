@@ -1,5 +1,5 @@
-import re; from u_constants import (ARGUMENT_SOURCE_DIVERSITY_MIN_MULTIPLIER, ARGUMENT_SOURCE_DIVERSITY_TARGET, MAX_CONTEXT_SAMPLES, STARTING_SCORE,); from d_noise_cleanup import is_usable_clause_text; from d_word_info_map import existing_concept_index, literal_from_index, text_similarity; from o_connection import ConnectionEndpoint
-from o_info_agent import Info_Agent; from d_target_text import distinctive_target_tokens, target_acronym_tokens, target_tokens; from utils import display_source; PROPER_NOUN_RE = re.compile(r"\b[A-Z][a-z]+\b"); NUMBER_RE = re.compile(r"\d"); SPECIFIC_DETAIL_RE = re.compile(r"\d[\d,./:-]*%?|%"); _MATCH_SCORE_CACHE = {}; _LEXICAL_MATCH_CACHE = {}
+import re; from engine.common.constants import (ARGUMENT_SOURCE_DIVERSITY_MIN_MULTIPLIER, ARGUMENT_SOURCE_DIVERSITY_TARGET, MAX_CONTEXT_SAMPLES, STARTING_SCORE,); from engine.extract.noise_cleanup import is_usable_clause_text; from engine.extract.word_info_map import existing_concept_index, literal_from_index, text_similarity; from engine.agents.connection import ConnectionEndpoint
+from engine.agents.info import Info_Agent; from engine.extract.target_text import distinctive_target_tokens, target_acronym_tokens, target_tokens; from engine.common.shm import display_source; PROPER_NOUN_RE = re.compile(r"\b[A-Z][a-z]+\b"); NUMBER_RE = re.compile(r"\d"); SPECIFIC_DETAIL_RE = re.compile(r"\d[\d,./:-]*%?|%"); _MATCH_SCORE_CACHE = {}; _LEXICAL_MATCH_CACHE = {}
 _SPECIFIC_CONTEXT_CACHE = {}
 # Clears thought caches caches or state.
 def clear_thought_caches():

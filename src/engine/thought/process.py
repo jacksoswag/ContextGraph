@@ -1,7 +1,7 @@
-import os; import struct; import subprocess; import tempfile
+import os; import struct; import subprocess; import tempfile; from pathlib import Path
 import numpy as np  # type: ignore
-import p_connection_graph; from u_constants import (ACTIVE_ANCHOR_PAIR_LIMIT, CONNECTION_RECORD_SIZE, GOAL_AGENT_LIMIT, MAX_CONTEXT_SAMPLES, MAX_THOUGHT_HOPS, MIN_SUCCESS_STEPS, PATH_TARGET_MATCH_THRESHOLD, PHASE_THINKING, SYNTHESIS_TARGET_MATCH_THRESHOLD, TARGET_SEED_LIMIT, THOUGHT_AGENTS_PER_WORKER, THINK_THREADS,)
-from d_noise_cleanup import is_clause_like_agent_text, is_usable_agent_text; from d_word_info_map import str_to_vector; from o_connection import Connector, ConnectionEndpoint; from o_thought_agent import Thought, clear_thought_caches; from d_target_text import distinctive_target_tokens, target_acronym_tokens, target_tokens; from utils import display_source
+import engine.graph.connections as p_connection_graph; from engine.common.constants import (ACTIVE_ANCHOR_PAIR_LIMIT, CONNECTION_RECORD_SIZE, GOAL_AGENT_LIMIT, MAX_CONTEXT_SAMPLES, MAX_THOUGHT_HOPS, MIN_SUCCESS_STEPS, PATH_TARGET_MATCH_THRESHOLD, PHASE_THINKING, SYNTHESIS_TARGET_MATCH_THRESHOLD, TARGET_SEED_LIMIT, THOUGHT_AGENTS_PER_WORKER, THINK_THREADS,)
+from engine.extract.noise_cleanup import is_clause_like_agent_text, is_usable_agent_text; from engine.extract.word_info_map import str_to_vector; from engine.agents.connection import Connector, ConnectionEndpoint; from engine.agents.thought import Thought, clear_thought_caches; from engine.extract.target_text import distinctive_target_tokens, target_acronym_tokens, target_tokens; from engine.common.shm import display_source
 
 # Returns target-normalized tokens used to decide whether an agent can anchor a route.
 def useful_agent_tokens(text):
@@ -450,7 +450,7 @@ def thought_swarm_stats(brain):
 
 # Returns the configured native thought-engine binary path.
 def _thought_binary_path():
-    return os.environ.get("BRAIN_THOUGHT_ENGINE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv", "thought-engine")
+    return os.environ.get("BRAIN_THOUGHT_ENGINE") or str(Path(__file__).resolve().parents[3] / "venv" / "thought-engine")
 
 # Returns graph neighbor indices for an agent from attached connectors.
 def _neighbor_indices_for_agent(agent):

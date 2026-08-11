@@ -1,4 +1,4 @@
-import re, sqlite3, threading; from collections import OrderedDict; from functools import lru_cache; from pathlib import Path; import numpy as np; from u_constants import (DEFAULT_MAP_PATH, EMBEDDING_MODEL_NAME, MAX_MERGE_SIMILARITY, MIN_MERGE_SIMILARITY); from u_language_constants import (CANONICAL_MODIFIER_CUES, STOPWORD_TOKENS)
+import re, sqlite3, threading; from collections import OrderedDict; from functools import lru_cache; from pathlib import Path; import numpy as np; from engine.common.constants import (DEFAULT_MAP_PATH, EMBEDDING_MODEL_NAME, MAX_MERGE_SIMILARITY, MIN_MERGE_SIMILARITY); from engine.common.language import (CANONICAL_MODIFIER_CUES, STOPWORD_TOKENS)
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)?"); EMBEDDING_MODEL = None; _DB_CONNECTIONS = {}; _WRITE_LOCK = threading.RLock(); TEXT_VECTOR_CACHE_LIMIT = 32768; _TEXT_VECTOR_CACHE = OrderedDict()
 
 # Normalizes text for semantic word storage.
@@ -47,7 +47,7 @@ def _vector_from_blob(blob):
 # Resolves the SQLite word-map path under the configured sql directory.
 def _db_path(path=DEFAULT_MAP_PATH):
     db_path = Path(path or DEFAULT_MAP_PATH).expanduser()
-    if not db_path.is_absolute(): db_path = Path(__file__).resolve().parent / db_path
+    if not db_path.is_absolute(): db_path = Path(__file__).resolve().parents[3] / db_path
     return db_path
 
 # Opens a thread-local SQLite word-map connection and ensures schema readiness.

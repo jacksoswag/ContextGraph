@@ -1,4 +1,4 @@
-import time; from queue import Empty; from u_constants import EXTRACTION_BLOCK_LIMIT, MAX_CONNECTIONS_PER_QUERY; from d_logic_extractor import find_connections
+import time; from queue import Empty; from engine.common.constants import EXTRACTION_BLOCK_LIMIT, MAX_CONNECTIONS_PER_QUERY; from engine.extract.logic import find_connections
 
 # Main thread manager for clause, logic, and connection extraction
 # Consumes scraped blocks, extracts connection records, and publishes them to the graph queue.

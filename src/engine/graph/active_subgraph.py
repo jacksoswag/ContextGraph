@@ -1,5 +1,5 @@
-import struct, p_connection_graph; from collections import deque; from u_constants import (ACTIVE_SUBGRAPH_CANDIDATE_MULTIPLIER, ACTIVE_SUBGRAPH_CONTEXT_HOPS, AGENT_POSITION_RECORD_BYTES, CONNECTION_RECORD_SIZE, GOAL_AGENT_LIMIT, TARGET_SEED_LIMIT, THINK_THREADS, THOUGHT_AGENTS_PER_WORKER,); from o_connection import Connector
-import p_thought_process as thought_process
+import struct; import engine.graph.connections as p_connection_graph; from collections import deque; from engine.common.constants import (ACTIVE_SUBGRAPH_CANDIDATE_MULTIPLIER, ACTIVE_SUBGRAPH_CONTEXT_HOPS, AGENT_POSITION_RECORD_BYTES, CONNECTION_RECORD_SIZE, GOAL_AGENT_LIMIT, TARGET_SEED_LIMIT, THINK_THREADS, THOUGHT_AGENTS_PER_WORKER,); from engine.agents.connection import Connector
+import engine.thought.process as thought_process
 # Builds adjacency from connection keys for active subgraph pruning.
 def _connection_adjacency(keys, directed=False):
     adjacency = {}
